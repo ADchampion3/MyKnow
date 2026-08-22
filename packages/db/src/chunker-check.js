@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import { chunkDocument, normalizeCanonicalText } from "./chunker.js";
+
+const text = "# 一\n\n" + "段落 😀 ".repeat(900) + "\n\n```js\nconst title = '# not a heading';\n```\n\n| key | value |\n| --- | --- |\n| a | b |\n";
+const document = chunkDocument(text, { strategy: "heading", parentChunkSize: 512, childChunkSize: 128, childOverlap: 20 });
+assert.ok(document.parents.length >= 1);
+assert.ok(document.children.length > document.parents.length);
+assert.ok(document.children.every((chunk) => chunk.start >= 0 && chunk.end <= Array.from(text).length && chunk.start < chunk.end));
+assert.ok(document.parents.every((chunk) => chunk.end - chunk.start <= 512 || chunk.forcedSplit));
+assert.ok(document.children.some((chunk) => chunk.blockTypes.includes("code")));
+assert.ok(document.children.some((chunk) => chunk.blockTypes.includes("table")));
+const protectedText = `${"a ".repeat(80)}[important](https://example.com)${" b".repeat(80)}`;
+const protectedDocument = chunkDocument(protectedText, { strategy: "legacy", parentChunkSize: 160, childChunkSize: 80, childOverlap: 0 });
+const linkStart = Array.from("a ".repeat(80)).length;
+const linkEnd = linkStart + Array.from("[important](https://example.com)").length;
+assert.ok(protectedDocument.children.some((chunk) => chunk.start <= linkStart && chunk.end >= linkEnd));
+const latexText = `${"x ".repeat(80)}$$\\frac{a}{b} + c$$${" y".repeat(80)}`;
+const latexDocument = chunkDocument(latexText, { strategy: "legacy", parentChunkSize: 160, childChunkSize: 80, childOverlap: 0 });
+const latexStart = Array.from("x ".repeat(80)).length;
+const latexEnd = latexStart + Array.from("$$\\frac{a}{b} + c$$").length;
+assert.ok(latexDocument.children.some((chunk) => chunk.start <= latexStart && chunk.end >= latexEnd));
+assert.equal(normalizeCanonicalText("a\r\nb\rc"), "a\nb\nc");
+const emojiChunk = chunkDocument("😀😀😀", { parentChunkSize: 10, childChunkSize: 2, childOverlap: 0 });
+assert.equal(emojiChunk.children[0].start, 0);
+assert.equal(emojiChunk.children.at(-1).end, 3);
+assert.equal(chunkDocument("# A\n\nOne\n\n## B\n\nTwo\n\n## C\n\nThree").strategy, "heading");
+console.log("chunker self-check passed");

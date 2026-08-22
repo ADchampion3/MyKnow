@@ -1,0 +1,2 @@
+﻿URL validation rejects localhost, loopback, private and link-local host patterns
+API and Worker validate URL independently

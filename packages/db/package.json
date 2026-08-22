@@ -1,0 +1,7 @@
+{
+  "name": "@myknow/db",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./src/index.js",
+  "dependencies": {"better-sqlite3": "^13.0.3", "drizzle-orm": "^0.45.2"}
+}

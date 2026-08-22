@@ -1,2 +1,7 @@
 .agents/
 .claude/
+node_modules/
+.next/
+data/
+apps/*/data/
+artifacts/sprint1/*.log

@@ -1,0 +1,20 @@
+{"sample":0,"strategy":"heading","chunkType":"text","sequence":0,"parentIndex":null,"childIndex":0,"start":0,"end":18,"forcedSplit":false,"contentPrefix":"# Research notes\n\n"}
+{"sample":1,"strategy":"heading","chunkType":"parent_text","sequence":1,"parentIndex":1,"childIndex":null,"start":18,"end":674,"forcedSplit":false,"contentPrefix":"## Section 1\n\nThis deterministic"}
+{"sample":2,"strategy":"heading","chunkType":"text","sequence":2,"parentIndex":1,"childIndex":0,"start":18,"end":32,"forcedSplit":false,"contentPrefix":"## Section 1\n\n"}
+{"sample":3,"strategy":"heading","chunkType":"text","sequence":3,"parentIndex":1,"childIndex":1,"start":20,"end":145,"forcedSplit":true,"contentPrefix":" Section 1\n\nThis deterministic e"}
+{"sample":4,"strategy":"heading","chunkType":"text","sequence":4,"parentIndex":1,"childIndex":2,"start":128,"end":265,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":5,"strategy":"heading","chunkType":"text","sequence":5,"parentIndex":1,"childIndex":3,"start":248,"end":385,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":6,"strategy":"heading","chunkType":"text","sequence":6,"parentIndex":1,"childIndex":4,"start":368,"end":505,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":7,"strategy":"heading","chunkType":"text","sequence":7,"parentIndex":1,"childIndex":5,"start":488,"end":625,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":8,"strategy":"heading","chunkType":"text","sequence":8,"parentIndex":1,"childIndex":6,"start":608,"end":674,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":9,"strategy":"heading","chunkType":"text","sequence":9,"parentIndex":null,"childIndex":0,"start":674,"end":688,"forcedSplit":false,"contentPrefix":"## Section 2\n\n"}
+{"sample":10,"strategy":"heading","chunkType":"parent_text","sequence":10,"parentIndex":3,"childIndex":null,"start":688,"end":1330,"forcedSplit":false,"contentPrefix":"This deterministic evidence para"}
+{"sample":11,"strategy":"heading","chunkType":"text","sequence":11,"parentIndex":3,"childIndex":0,"start":688,"end":801,"forcedSplit":true,"contentPrefix":"This deterministic evidence para"}
+{"sample":12,"strategy":"heading","chunkType":"text","sequence":12,"parentIndex":3,"childIndex":1,"start":784,"end":921,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":13,"strategy":"heading","chunkType":"text","sequence":13,"parentIndex":3,"childIndex":2,"start":904,"end":1041,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":14,"strategy":"heading","chunkType":"text","sequence":14,"parentIndex":3,"childIndex":3,"start":1024,"end":1161,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":15,"strategy":"heading","chunkType":"text","sequence":15,"parentIndex":3,"childIndex":4,"start":1144,"end":1281,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":16,"strategy":"heading","chunkType":"text","sequence":16,"parentIndex":3,"childIndex":5,"start":1264,"end":1330,"forcedSplit":true,"contentPrefix":" context context context context"}
+{"sample":17,"strategy":"heading","chunkType":"text","sequence":17,"parentIndex":null,"childIndex":0,"start":1330,"end":1344,"forcedSplit":false,"contentPrefix":"## Section 3\n\n"}
+{"sample":18,"strategy":"heading","chunkType":"parent_text","sequence":18,"parentIndex":5,"childIndex":null,"start":1344,"end":1986,"forcedSplit":false,"contentPrefix":"This deterministic evidence para"}
+{"sample":19,"strategy":"heading","chunkType":"text","sequence":19,"parentIndex":5,"childIndex":0,"start":1344,"end":1457,"forcedSplit":true,"contentPrefix":"This deterministic evidence para"}

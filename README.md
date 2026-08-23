@@ -14,11 +14,16 @@ Copy `.env.example` to `.env` when custom configuration is needed. The API expos
 
 ## Sprint 2 resource flow
 
-Import through `POST /api/resources` using JSON with `name`, `mimeType`, `contentBase64`, and `knowledgeBaseId` for `.md`/`.txt`/`.pdf` files, or `url` for an HTTP/HTTPS web-page snapshot. The Worker stores immutable source bytes, records a processing run and canonical artifact, applies the adaptive heading/heuristic/recursive chunker, creates parent/child chunks, and indexes only child chunks in SQLite FTS5. Search uses `GET /api/search?q=...&knowledgeBaseId=...`; results include the matching child and optional `parent_content`. Resource files and canonical artifacts are stored under `RESOURCE_STORAGE_DIR`; keep that directory server-side.
+Import text through `POST /api/resources` with JSON `{ name, knowledgeBaseId, content }`, or upload a local `.md`, `.txt`, or `.pdf` through `multipart/form-data` using fields `name`, `knowledgeBaseId`, and `file`. Add a new immutable version through `POST /api/resources/:id/versions`; use `Idempotency-Key` only when a transport retry must return the original result. URL fetching and Base64 imports are intentionally not part of the Sprint 2 contract. The Worker stores immutable source bytes, records a processing run and canonical artifact, applies the adaptive heading/heuristic/recursive chunker, creates parent/child chunks, and indexes only child chunks in SQLite FTS5. Search uses `GET /api/search?q=...&knowledgeBaseId=...`; default results are limited to each resource's last successful current version, while an explicit `resourceVersionId` searches history. Resource files and canonical artifacts are stored under `RESOURCE_STORAGE_DIR`; keep that directory server-side.
 
-Processing controls are available through `POST /api/resources/:id/reprocess`, `POST /api/resources/rebuild`, `GET /api/resources/:id/processing-runs`, and `POST /api/resources/:id/chunk-preview`. The project is still in early development, so derived chunks and FTS rows are intentionally rebuildable when the schema or chunking contract changes.
+Processing controls are available through `POST /api/resources/:id/reprocess`, `POST /api/resources/rebuild`, `GET /api/resources/:id/processing-runs`, `POST /api/resources/:id/chunk-preview`, `POST /api/resources/:id/archive`, and `POST /api/resources/:id/restore`. Rebuild uses build-then-swap, so an old successful index remains searchable while a replacement run is built. Resource states are `pending`, `processing`, `indexed`, `degraded`, `failed`, and `archived`; PDF parsing remains best-effort.
+
+The database schema is a deliberate Sprint 2 break. A fresh empty database is required; an older database reports `DATABASE_RECREATE_REQUIRED`. Recreate only the exact SQLite file with `node scripts/recreate-db.js --confirm <path-to-db>`; the raw storage directory is not deleted and unreferenced blobs are reported for manual review.
 
 The complete chunking contract is documented in [`docs/CHUNKING_MECHANISM.md`](docs/CHUNKING_MECHANISM.md).
+The raw-source contract and state machine are documented in [`docs/SPRINT2_RAW_SOURCE_CONTRACT.md`](docs/SPRINT2_RAW_SOURCE_CONTRACT.md).
+
+For large PDFs, `RESOURCE_PARSER_TIMEOUT_MS` controls the MarkItDown subprocess timeout (default 120 seconds).
 
 ## Source layout
 
@@ -28,7 +33,7 @@ The runtime entry points stay stable, while implementation is grouped by respons
 apps/api/src/
   index.js                 # process bootstrap and database readiness
   app.js                   # HTTP lifecycle and route dispatch
-  http.js                  # JSON response, body parsing, error mapping
+  http.js                  # JSON/multipart response, body parsing, error mapping
   context.js               # shared API capabilities and audit/task helpers
   routes/                  # knowledge bases, resources, search, tasks
 apps/worker/src/
@@ -40,7 +45,7 @@ packages/db/src/
   index.js                 # stable package exports
   database/                # connection and migrations
   schema.js                # Drizzle table definitions
-  resources.js             # source storage and URL safety primitives
+  resources.js             # source storage, integrity, and resource status primitives
   chunker.js               # canonical text and parent/child chunking
 ```
 

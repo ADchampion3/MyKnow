@@ -1,7 +1,12 @@
 .agents/
 .claude/
 node_modules/
+.venv-pdf/
 .next/
 data/
 apps/*/data/
 artifacts/sprint1/*.log
+artifacts/sprint2/pdf-e2e-storage-*/
+artifacts/sprint2/pdf-e2e-logs-*/
+artifacts/sprint2/pdf-page-*.png
+artifacts/sprint2/pdf-markitdown-full.md

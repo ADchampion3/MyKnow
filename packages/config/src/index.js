@@ -14,8 +14,9 @@ export function loadConfig(env = process.env) {
     apiPort: positiveInt("API_PORT", env.API_PORT, 3001),
     webPort: positiveInt("WEB_PORT", env.WEB_PORT, 3000),
     workerPollIntervalMs: positiveInt("WORKER_POLL_INTERVAL_MS", env.WORKER_POLL_INTERVAL_MS, 1000),
-    resourceStorageDir: env.RESOURCE_STORAGE_DIR || path.resolve(repoRoot, "data/resources"),
+    resourceStorageDir: path.resolve(repoRoot, env.RESOURCE_STORAGE_DIR || "data/resources"),
     resourceMaxBytes: positiveInt("RESOURCE_MAX_BYTES", env.RESOURCE_MAX_BYTES, 2_000_000),
+    resourceParserTimeoutMs: positiveInt("RESOURCE_PARSER_TIMEOUT_MS", env.RESOURCE_PARSER_TIMEOUT_MS, 120_000),
     modelProvider: provider,
     modelApiBaseUrl: env.MODEL_API_BASE_URL || "",
     hasModelApiKey: Boolean(env.MODEL_API_KEY)

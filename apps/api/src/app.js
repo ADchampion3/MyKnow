@@ -17,7 +17,7 @@ export const createRequestHandler = ({ config, sqlite, db }) => {
       res.writeHead(204, {
         "access-control-allow-origin": ctx.allowedOrigin(req.headers.origin),
         "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
-        "access-control-allow-headers": "content-type"
+        "access-control-allow-headers": "content-type, idempotency-key"
       });
       return res.end();
     }
@@ -33,7 +33,8 @@ export const createRequestHandler = ({ config, sqlite, db }) => {
         pathname: parsed.pathname,
         method: req.method,
         body: ["POST", "PATCH"].includes(req.method) ? await ctx.readBody(req) : {},
-        requestId
+        requestId,
+        idempotencyKey: typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"].trim() : null
       };
       for (const handler of routeHandlers) if (await handler({ ctx, request })) return;
       return ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Route not found"), requestId);

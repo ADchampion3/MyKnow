@@ -1,138 +1,222 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chunkDocument, decodeBase64, ensurePendingResourceTasks, normalizeChunkingConfig, persistBytes, readBytes, sha256, supportedMime, validatePublicUrlResolved } from "@myknow/db";
+import { chunkDocument, contentStorageKey, mimeForExtension, normalizeChunkingConfig, persistBytes, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
 
-const createImport = async (ctx, body, requestId) => {
-  const { config, sqlite } = ctx;
-  const name = ctx.inputName(body);
-  const kbId = typeof body?.knowledgeBaseId === "string" ? body.knowledgeBaseId : null;
-  if (!name || !kbId) throw Object.assign(new Error("valid name and knowledgeBaseId are required"), { code: "VALIDATION_ERROR" });
-  if (!ctx.validKb(kbId)) throw Object.assign(new Error("Knowledge base not found"), { code: "NOT_FOUND" });
-  const kb = sqlite.prepare("SELECT chunking_config FROM knowledge_bases WHERE id=?").get(kbId);
-  let chunkingConfig;
-  try { chunkingConfig = normalizeChunkingConfig(kb?.chunking_config ? JSON.parse(kb.chunking_config) : {}); }
-  catch (caught) { throw Object.assign(new Error(`invalid knowledge-base chunking config: ${caught.message}`), { code: "VALIDATION_ERROR" }); }
+const textMimes = new Set(["text/plain", "text/markdown"]);
+const resourceStatuses = new Set(["pending", "processing", "indexed", "degraded", "failed", "archived"]);
 
-  const hasResourceId = body?.resourceId !== undefined && body?.resourceId !== null;
-  if (hasResourceId && typeof body.resourceId !== "string") throw Object.assign(new Error("resourceId must be a string"), { code: "VALIDATION_ERROR" });
-  const updating = hasResourceId ? ctx.resource(body.resourceId) : null;
-  if (hasResourceId && !updating) throw Object.assign(new Error("resource not found"), { code: "NOT_FOUND" });
-
+const fail = (message, code = "VALIDATION_ERROR") => Object.assign(new Error(message), { code });
+const safeFilename = (value) => path.posix.basename(String(value || "").replaceAll("\\", "/")).slice(0, 255);
+const readVerified = (root, key, expectedSize, expectedSha, label) => {
   let bytes;
-  let mimeType;
-  let sourceType;
-  let sourceUrl = null;
-  let storageKey;
-  const hasUrl = typeof body?.url === "string";
-  const hasContent = typeof body?.contentBase64 === "string";
-  if (hasUrl && !hasContent) {
-    sourceUrl = await validatePublicUrlResolved(body.url);
-    bytes = Buffer.from(sourceUrl);
-    mimeType = "text/html";
-    sourceType = "url";
-    storageKey = path.posix.join("urls", sha256(sourceUrl) + ".url");
-  } else if (hasContent && !hasUrl) {
-    mimeType = body.mimeType;
-    sourceType = "file";
-    bytes = decodeBase64(body.contentBase64);
-    if (!supportedMime(name, mimeType)) throw Object.assign(new Error("only .md, .txt, and .pdf are supported"), { code: "UNSUPPORTED_MEDIA_TYPE" });
-    if (!bytes.length || bytes.length > config.resourceMaxBytes) throw Object.assign(new Error("file size is invalid"), { code: "VALIDATION_ERROR" });
-    storageKey = path.posix.join("files", sha256(bytes) + path.extname(name).toLowerCase());
-  } else {
-    throw Object.assign(new Error("provide exactly one of url or contentBase64"), { code: "VALIDATION_ERROR" });
-  }
+  try { bytes = readBytes(root, key); } catch { throw fail(`${label} is missing`, "SOURCE_INTEGRITY_FAILED"); }
+  if (bytes.length !== expectedSize || sha256(bytes) !== expectedSha) throw fail(`${label} integrity check failed`, "SOURCE_INTEGRITY_FAILED");
+  return bytes;
+};
 
-  const fingerprint = sha256(bytes);
-  const duplicate = sqlite.prepare("SELECT rv.*, r.id AS resource_id FROM resource_versions rv JOIN resources r ON r.id=rv.resource_id WHERE rv.content_sha256=? LIMIT 1").get(fingerprint);
-  if (duplicate && !updating) {
-    sqlite.prepare("INSERT OR IGNORE INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(duplicate.resource_id, kbId, ctx.now());
-    return { resource: ctx.resource(duplicate.resource_id), version: duplicate, task: ctx.taskForVersion(duplicate.id), duplicate: true };
+const parseImportInput = (body, displayName) => {
+  if (body?.url !== undefined || body?.contentBase64 !== undefined) throw fail("URL and Base64 imports are not supported");
+  const hasText = typeof body?.content === "string";
+  const file = body?.file && Buffer.isBuffer(body.file.bytes) ? body.file : null;
+  if (hasText === Boolean(file)) throw fail("provide exactly one of content or file");
+  if (file) {
+    const originalFilename = safeFilename(file.filename);
+    const declaredMimeType = typeof file.mimeType === "string" ? file.mimeType.split(";", 1)[0].trim().toLowerCase() : "";
+    const mimeType = declaredMimeType && declaredMimeType !== "application/octet-stream" ? declaredMimeType : mimeForExtension(originalFilename) || declaredMimeType;
+    if (!originalFilename || !supportedMime(originalFilename, mimeType)) throw fail("file extension and MIME type must match .md, .txt, or .pdf", "UNSUPPORTED_MEDIA_TYPE");
+    return { bytes: file.bytes, sourceType: "file", mimeType, originalFilename, displayName };
   }
-  if (updating && sqlite.prepare("SELECT id FROM resource_versions WHERE resource_id=? AND content_sha256=?").get(updating.id, fingerprint)) throw Object.assign(new Error("resource already has this content"), { code: "RESOURCE_DUPLICATE" });
+  const mimeType = typeof body?.mimeType === "string" ? body.mimeType.trim().toLowerCase() : mimeForExtension(displayName) || "text/plain";
+  if (!textMimes.has(mimeType) || (mimeForExtension(displayName) && !supportedMime(displayName, mimeType))) throw fail("text imports must use .md/.txt and text/plain or text/markdown", "UNSUPPORTED_MEDIA_TYPE");
+  const bytes = Buffer.from(body.content, "utf8");
+  return { bytes, sourceType: "text", mimeType, originalFilename: null, displayName };
+};
 
-  persistBytes(config.resourceStorageDir, storageKey, bytes);
+const chunkingFor = (sqlite, resourceId, kbId) => {
+  const row = kbId
+    ? sqlite.prepare("SELECT chunking_config FROM knowledge_bases WHERE id=?").get(kbId)
+    : sqlite.prepare("SELECT rv.chunking_config FROM resource_versions rv WHERE rv.resource_id=? ORDER BY rv.created_at DESC,rv.id DESC LIMIT 1").get(resourceId);
+  try { return normalizeChunkingConfig(row?.chunking_config ? JSON.parse(row.chunking_config) : {}); }
+  catch (caught) { throw fail(`invalid knowledge-base chunking config: ${caught.message}`); }
+};
+
+const taskFor = (ctx, versionId) => ctx.taskView(ctx.taskForVersion(versionId));
+const versionPayload = (ctx, row) => ctx.versionView(row);
+const resourcePayload = (ctx, row) => {
+  if (!row) return null;
+  const versions = ctx.sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(row.id).map((version) => versionPayload(ctx, version));
+  const latest = versions[0];
+  return { ...ctx.resourceView(row), currentVersion: versions.find((version) => version.id === row.current_version_id) || null, latestVersion: latest || null, versions, task: latest ? taskFor(ctx, latest.id) : null };
+};
+
+const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId = null }) => {
+  const { config, sqlite } = ctx;
+  const existing = resourceId ? ctx.resource(resourceId) : null;
+  if (resourceId && !existing) throw fail("resource not found", "NOT_FOUND");
+  if (existing?.status === "archived") throw fail("archived resources cannot receive new versions", "RESOURCE_ARCHIVED");
+  if (existing && body?.name !== undefined && ctx.inputName({ name: body.name }) !== existing.name) throw fail("rename the resource with PATCH before adding a version", "INVALID_STATE_TRANSITION");
+  const name = existing ? existing.name : ctx.inputName({ name: body?.name });
+  if (!name) throw fail("valid name is required");
+  const kbId = existing ? null : typeof body?.knowledgeBaseId === "string" ? body.knowledgeBaseId.trim() : null;
+  if (!existing && !kbId) throw fail("valid knowledgeBaseId is required");
+  if (kbId && !ctx.validKb(kbId)) throw fail("Knowledge base not found", "NOT_FOUND");
+  if (existing && body?.knowledgeBaseId !== undefined) {
+    if (typeof body.knowledgeBaseId !== "string" || !body.knowledgeBaseId.trim()) throw fail("knowledgeBaseId must be a non-empty string");
+    if (!sqlite.prepare("SELECT 1 FROM resource_knowledge_bases WHERE resource_id=? AND knowledge_base_id=?").get(existing.id, body.knowledgeBaseId.trim())) throw fail("resource is not linked to this knowledge base", "NOT_FOUND");
+  }
+  const input = parseImportInput(body, name);
+  if (!input.bytes.length || input.bytes.length > config.resourceMaxBytes) throw fail("source size is invalid");
+  if (existing && existing.source_type !== input.sourceType) throw fail("a resource cannot change source type", "INVALID_STATE_TRANSITION");
+  const fingerprint = sha256(input.bytes);
+  const requestFingerprint = sha256(JSON.stringify({ resourceId: existing?.id || null, kbId, name, sourceType: input.sourceType, mimeType: input.mimeType, originalFilename: input.originalFilename, contentSha256: fingerprint }));
+  if (idempotencyKey) {
+    if (idempotencyKey.length > 200) throw fail("Idempotency-Key is too long");
+    const prior = sqlite.prepare("SELECT * FROM resource_versions WHERE idempotency_key=?").get(idempotencyKey);
+    if (prior) {
+      if (prior.request_fingerprint !== requestFingerprint) throw fail("Idempotency-Key was already used for a different request", "IDEMPOTENCY_KEY_REUSED");
+      return { status: 200, data: { resource: resourcePayload(ctx, ctx.resource(prior.resource_id)), version: versionPayload(ctx, prior), task: taskFor(ctx, prior.id), idempotent: true } };
+    }
+  }
+  const storageKey = contentStorageKey(fingerprint);
+  persistBytes(config.resourceStorageDir, storageKey, input.bytes);
   const timestamp = ctx.now();
-  const resourceId = updating?.id || crypto.randomUUID();
+  const targetResourceId = existing?.id || crypto.randomUUID();
   const versionId = crypto.randomUUID();
-  const tx = sqlite.transaction(() => {
-    if (!updating) sqlite.prepare("INSERT INTO resources (id,name,source_type,status,current_version_id,created_at,updated_at) VALUES (?,?,?,'pending',?,?,?)").run(resourceId, name, sourceType, versionId, timestamp, timestamp);
-    else sqlite.prepare("UPDATE resources SET name=?,source_type=?,status='pending',current_version_id=?,updated_at=? WHERE id=?").run(name, sourceType, versionId, timestamp, resourceId);
-    sqlite.prepare("INSERT INTO resource_versions (id,resource_id,content_sha256,storage_key,mime_type,byte_size,source_url,chunking_config,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?)").run(versionId, resourceId, fingerprint, storageKey, mimeType, bytes.length, sourceUrl, JSON.stringify(chunkingConfig), timestamp, timestamp);
-    sqlite.prepare("INSERT OR IGNORE INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(resourceId, kbId, timestamp);
-    const task = ctx.queueVersion(versionId, requestId);
-    ctx.audit("imported", "resource", resourceId, requestId, { resourceVersionId: versionId, sourceType });
-    return task;
-  });
-  const task = tx();
-  return { resource: ctx.resource(resourceId), version: ctx.version(versionId), task, duplicate: false };
+  let task;
+  sqlite.transaction(() => {
+    if (!existing) sqlite.prepare("INSERT INTO resources (id,name,source_type,status,current_version_id,created_at,updated_at) VALUES (?,?,?,'pending',NULL,?,?)").run(targetResourceId, name, input.sourceType, timestamp, timestamp);
+    sqlite.prepare("INSERT INTO resource_versions (id,resource_id,content_sha256,storage_key,mime_type,byte_size,original_filename,chunking_config,status,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?,?,?)").run(versionId, targetResourceId, fingerprint, storageKey, input.mimeType, input.bytes.length, input.originalFilename, JSON.stringify(chunkingFor(sqlite, targetResourceId, kbId)), idempotencyKey, requestFingerprint, timestamp, timestamp);
+    if (!existing) sqlite.prepare("INSERT INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(targetResourceId, kbId, timestamp);
+    task = ctx.queueVersion(versionId, requestId, existing ? "new-version" : "import");
+    ctx.audit("imported", "resource_version", versionId, requestId, { resourceId: targetResourceId, sourceType: input.sourceType });
+  })();
+  return { status: 201, data: { resource: resourcePayload(ctx, ctx.resource(targetResourceId)), version: versionPayload(ctx, ctx.version(versionId)), task: ctx.taskView(task), idempotent: false } };
+};
+
+const queueVersionIfNeeded = (ctx, versionId, requestId, reason) => {
+  const active = ctx.sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(versionId);
+  return active ? ctx.taskView(active) : ctx.taskView(ctx.queueVersion(versionId, requestId, reason));
 };
 
 export const handleResourceRoutes = async ({ ctx, request }) => {
-  const { pathname, method, parsed, body, requestId, res } = request;
+  const { pathname, method, parsed, body, requestId, idempotencyKey, res } = request;
   const { sqlite, config } = ctx;
 
   if (pathname === "/api/resources" && method === "POST") {
-    ctx.json(res, 201, await createImport(ctx, body, requestId), null, requestId);
+    const result = await importResource(ctx, { body, requestId, idempotencyKey });
+    ctx.json(res, result.status, result.data, null, requestId);
     return true;
   }
+
+  const versionCreateMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions$/);
+  if (versionCreateMatch && method === "POST") {
+    const result = await importResource(ctx, { body, requestId, idempotencyKey, resourceId: versionCreateMatch[1] });
+    ctx.json(res, result.status, result.data, null, requestId);
+    return true;
+  }
+
   if (pathname === "/api/resources/rebuild" && method === "POST") {
     const timestamp = ctx.now();
+    let queued = 0;
     sqlite.transaction(() => {
-      sqlite.prepare("DELETE FROM resource_fts").run();
-      sqlite.prepare("UPDATE chunks SET status='superseded'").run();
-      sqlite.prepare("UPDATE processing_runs SET status='superseded',updated_at=? WHERE status='indexed'").run(timestamp);
-      sqlite.prepare("UPDATE resource_versions SET status='pending',active_processing_run_id=NULL,error_summary=NULL,updated_at=?").run(timestamp);
-      sqlite.prepare("UPDATE resources SET status=CASE WHEN status='archived' THEN status ELSE 'pending' END,updated_at=?").run(timestamp);
+      for (const version of sqlite.prepare("SELECT rv.* FROM resource_versions rv JOIN resources r ON r.id=rv.resource_id WHERE r.status <> 'archived' ORDER BY rv.created_at,rv.id").all()) {
+        const active = sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(version.id);
+        sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'pending' ELSE 'indexed' END,error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, version.id);
+        if (!active) { ctx.queueVersion(version.id, requestId, "explicit-full-rebuild"); queued += 1; }
+        refreshResourceStatus(sqlite, version.resource_id, timestamp);
+      }
     })();
-    const queued = ensurePendingResourceTasks(sqlite, "explicit-full-rebuild");
     ctx.audit("rebuild_queued", "resources", "all", requestId, { queued });
-    ctx.json(res, 202, { queued, mode: "full-rebuild" }, null, requestId);
+    ctx.json(res, 202, { queued, mode: "build-then-swap", versions: "all-active" }, null, requestId);
     return true;
   }
+
   if (pathname === "/api/resources" && method === "GET") {
     const kb = parsed.searchParams.get("knowledgeBaseId");
     const status = parsed.searchParams.get("status");
+    const includeArchived = parsed.searchParams.get("includeArchived") === "true";
     const page = Number(parsed.searchParams.get("page") || 1);
     const limit = Number(parsed.searchParams.get("limit") || 50);
-    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (status && !["pending", "processing", "indexed", "failed", "archived"].includes(status))) {
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (status && !resourceStatuses.has(status))) {
       ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/status is invalid"), requestId);
       return true;
     }
     const clauses = [];
     const args = [];
-    let sql = "SELECT r.* FROM resources r";
+    let sql = "SELECT DISTINCT r.* FROM resources r";
     if (kb) { sql += " JOIN resource_knowledge_bases rkb ON rkb.resource_id=r.id"; clauses.push("rkb.knowledge_base_id=?"); args.push(kb); }
-    if (status) { clauses.push("r.status=?"); args.push(status); }
+    if (!includeArchived) clauses.push("r.status <> 'archived'");
+    if (status) clauses.push("r.status=?");
     if (clauses.length) sql += ` WHERE ${clauses.join(" AND ")}`;
-    sql += " ORDER BY r.updated_at DESC LIMIT ? OFFSET ?";
+    sql += " ORDER BY r.updated_at DESC,r.id DESC LIMIT ? OFFSET ?";
     args.push(limit, (page - 1) * limit);
-    ctx.json(res, 200, sqlite.prepare(sql).all(...args), null, requestId);
+    ctx.json(res, 200, sqlite.prepare(sql).all(...args).map((row) => resourcePayload(ctx, row)), null, requestId);
+    return true;
+  }
+
+  const archiveMatch = pathname.match(/^\/api\/resources\/([^/]+)\/(archive|restore)$/);
+  if (archiveMatch && method === "POST") {
+    const resource = ctx.resource(archiveMatch[1]);
+    if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    const timestamp = ctx.now();
+    if (archiveMatch[2] === "archive") {
+      sqlite.transaction(() => {
+        sqlite.prepare("UPDATE resources SET status='archived',archived_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, resource.id);
+        sqlite.prepare("UPDATE tasks SET status='failed',error_code='RESOURCE_ARCHIVED',error_summary='Resource archived',finished_at=?,updated_at=? WHERE resource_version_id IN (SELECT id FROM resource_versions WHERE resource_id=?) AND status IN ('queued','retrying')").run(timestamp, timestamp, resource.id);
+        ctx.audit("archived", "resource", resource.id, requestId);
+      })();
+      ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
+      return true;
+    }
+    let queued = 0;
+    sqlite.transaction(() => {
+      sqlite.prepare("UPDATE resources SET archived_at=NULL,status='pending',updated_at=? WHERE id=? AND status='archived'").run(timestamp, resource.id);
+      for (const version of sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? AND active_processing_run_id IS NULL AND status IN ('pending','failed')").all(resource.id)) {
+        sqlite.prepare("UPDATE resource_versions SET status='pending',error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, version.id);
+        if (!sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(version.id)) { ctx.queueVersion(version.id, requestId, "restore"); queued += 1; }
+      }
+      refreshResourceStatus(sqlite, resource.id, timestamp);
+      ctx.audit("restored", "resource", resource.id, requestId, { queued });
+    })();
+    ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
     return true;
   }
 
   const resourceMatch = pathname.match(/^\/api\/resources\/([^/]+)$/);
+  if (resourceMatch && method === "PATCH") {
+    const resource = ctx.resource(resourceMatch[1]);
+    if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    const name = ctx.inputName(body);
+    if (!name) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "name must be 1-120 characters"), requestId); return true; }
+    sqlite.prepare("UPDATE resources SET name=?,updated_at=? WHERE id=?").run(name, ctx.now(), resource.id);
+    ctx.audit("renamed", "resource", resource.id, requestId, { name });
+    ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
+    return true;
+  }
   if (resourceMatch && method === "GET") {
     const found = ctx.resource(resourceMatch[1]);
     if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    ctx.json(res, 200, { ...found, versions: sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC").all(found.id), task: found.current_version_id ? ctx.taskForVersion(found.current_version_id) : null }, null, requestId);
+    ctx.json(res, 200, resourcePayload(ctx, found), null, requestId);
     return true;
   }
 
   const processingRunsMatch = pathname.match(/^\/api\/resources\/([^/]+)\/processing-runs$/);
   if (processingRunsMatch && method === "GET") {
     if (!ctx.resource(processingRunsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    const runs = sqlite.prepare("SELECT pr.*,rv.resource_id,rv.content_sha256 AS source_sha256 FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE rv.resource_id=? ORDER BY pr.created_at DESC").all(processingRunsMatch[1]);
-    ctx.json(res, 200, runs.map((run) => ({ ...run, attempts: sqlite.prepare("SELECT * FROM processing_run_attempts WHERE processing_run_id=? ORDER BY started_at").all(run.id) })), null, requestId);
+    const runs = sqlite.prepare("SELECT pr.*,rv.resource_id,rv.content_sha256 AS source_sha256 FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE rv.resource_id=? ORDER BY pr.created_at DESC,pr.id DESC").all(processingRunsMatch[1]);
+    ctx.json(res, 200, runs.map((run) => ({ ...ctx.runView(run), attempts: sqlite.prepare("SELECT id,processing_run_id,reader_name,reader_version,status,error_code,error_summary,metadata,started_at,finished_at FROM processing_run_attempts WHERE processing_run_id=? ORDER BY started_at,id").all(run.id) })), null, requestId);
     return true;
   }
 
   const artifactMatch = pathname.match(/^\/api\/resources\/([^/]+)\/processing-runs\/([^/]+)\/canonical$/);
   if (artifactMatch && method === "GET") {
-    if (!ctx.resource(artifactMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    const run = sqlite.prepare("SELECT pr.* FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(artifactMatch[2], artifactMatch[1]);
+    const resource = ctx.resource(artifactMatch[1]);
+    const run = resource && sqlite.prepare("SELECT pr.* FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(artifactMatch[2], artifactMatch[1]);
     if (!run?.canonical_storage_key) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Canonical artifact not found"), requestId); return true; }
-    try { ctx.json(res, 200, JSON.parse(readBytes(config.resourceStorageDir, run.canonical_storage_key).toString("utf8")), null, requestId); }
-    catch { ctx.json(res, 500, null, ctx.error("INTERNAL_ERROR", "Canonical artifact is unreadable"), requestId); }
+    try {
+      const bytes = readVerified(config.resourceStorageDir, run.canonical_storage_key, run.canonical_byte_size, run.canonical_sha256, "canonical artifact");
+      ctx.json(res, 200, JSON.parse(bytes.toString("utf8")), null, requestId);
+    } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
 
@@ -141,7 +225,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     if (!ctx.resource(previewMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
     if (typeof body?.text !== "string" || !body.text.trim() || body.text.length > 64 * 1024) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "text must be 1-65536 characters"), requestId); return true; }
     try {
-      const document = chunkDocument(body.text, normalizeChunkingConfig(body?.chunkingConfig || {}));
+      const document = chunkDocument(body.text, normalizeChunkingConfig(body?.chunkingConfig ?? {}));
       if (document.totalChunks > 500) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "preview produces too many chunks"), requestId); return true; }
       ctx.json(res, 200, { strategy: document.strategy, profile: document.profile, config: document.config, blocks: document.blocks, parents: document.parents, children: document.children, diagnostics: { totalChunks: document.totalChunks, parentCount: document.parents.length, childCount: document.children.length } }, null, requestId);
     } catch (caught) { ctx.respondCaught(res, caught, requestId); }
@@ -151,30 +235,33 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   const reprocessMatch = pathname.match(/^\/api\/resources\/([^/]+)\/reprocess$/);
   if (reprocessMatch && method === "POST") {
     const found = ctx.resource(reprocessMatch[1]);
-    const target = found && (body?.versionId ? ctx.version(body.versionId) : ctx.version(found.current_version_id));
-    if (!found || !target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource version not found"), requestId); return true; }
-    const activeTask = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND json_extract(payload,'$.resourceVersionId')=? AND status IN ('queued','running','retrying') ORDER BY created_at DESC LIMIT 1").get(target.id);
-    if (activeTask) { ctx.json(res, 202, activeTask, null, requestId); return true; }
+    if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (found.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be processed"), requestId); return true; }
+    const target = body?.versionId ? ctx.version(body.versionId) : ctx.version(found.current_version_id);
+    if (!target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource version not found"), requestId); return true; }
+    const activeTask = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') ORDER BY created_at DESC,id DESC LIMIT 1").get(target.id);
+    if (activeTask) { ctx.json(res, 202, ctx.taskView(activeTask), null, requestId); return true; }
     let chunkingConfig = null;
     if (body?.chunkingConfig !== undefined) {
       try { chunkingConfig = JSON.stringify(normalizeChunkingConfig(body.chunkingConfig)); }
       catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     }
     const timestamp = ctx.now();
+    let task;
     sqlite.transaction(() => {
-      sqlite.prepare("UPDATE resource_versions SET status='pending',chunking_config=COALESCE(?,chunking_config),error_summary=NULL,updated_at=? WHERE id=?").run(chunkingConfig, timestamp, target.id);
-      sqlite.prepare("UPDATE resources SET status='pending',updated_at=? WHERE id=? AND current_version_id=?").run(timestamp, found.id, target.id);
+      sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'pending' ELSE 'indexed' END,chunking_config=COALESCE(?,chunking_config),error_summary=NULL,updated_at=? WHERE id=?").run(chunkingConfig, timestamp, target.id);
+      refreshResourceStatus(sqlite, found.id, timestamp);
+      task = ctx.queueVersion(target.id, requestId, "reprocess");
+      ctx.audit("reprocess_requested", "resource_version", target.id, requestId, { taskId: task.id });
     })();
-    const task = ctx.queueVersion(target.id, requestId);
-    ctx.audit("reprocess_requested", "resource_version", target.id, requestId, { taskId: task.id });
-    ctx.json(res, 202, task, null, requestId);
+    ctx.json(res, 202, ctx.taskView(task), null, requestId);
     return true;
   }
 
   const versionsMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions$/);
   if (versionsMatch && method === "GET") {
     if (!ctx.resource(versionsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    ctx.json(res, 200, sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC").all(versionsMatch[1]), null, requestId);
+    ctx.json(res, 200, sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(versionsMatch[1]).map((version) => versionPayload(ctx, version)), null, requestId);
     return true;
   }
 
@@ -182,9 +269,11 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (versionContentMatch && method === "GET") {
     const found = ctx.version(versionContentMatch[2]);
     if (!found || found.resource_id !== versionContentMatch[1]) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version not found"), requestId); return true; }
-    const bytes = readBytes(config.resourceStorageDir, found.storage_key);
-    res.writeHead(200, { "content-type": found.mime_type, "content-length": bytes.length, "cache-control": "no-store", "x-request-id": requestId, "access-control-allow-origin": ctx.allowedOrigin(res.req?.headers?.origin) });
-    res.end(bytes);
+    try {
+      const bytes = readVerified(config.resourceStorageDir, found.storage_key, found.byte_size, found.content_sha256, "source");
+      res.writeHead(200, { "content-type": found.mime_type, "content-length": bytes.length, "cache-control": "no-store", "x-request-id": requestId, "access-control-allow-origin": ctx.allowedOrigin(res.req?.headers?.origin) });
+      res.end(bytes);
+    } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
 
@@ -192,27 +281,28 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (versionMatch && method === "GET") {
     const found = ctx.version(versionMatch[2]);
     if (!found || found.resource_id !== versionMatch[1]) ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version not found"), requestId);
-    else ctx.json(res, 200, found, null, requestId);
+    else ctx.json(res, 200, versionPayload(ctx, found), null, requestId);
     return true;
   }
 
   const retryResourceMatch = pathname.match(/^\/api\/resources\/([^/]+)\/retry$/);
   if (retryResourceMatch && method === "POST") {
     const found = ctx.resource(retryResourceMatch[1]);
-    const current = found && ctx.version(found.current_version_id);
-    const task = current && ctx.taskForVersion(current.id);
-    if (!current || !task) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource task not found"), requestId); return true; }
-    if (current.status !== "failed" || task.status !== "failed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed resources can be retried"), requestId); return true; }
-    if (task.retry_count >= task.retry_limit) { ctx.json(res, 409, null, ctx.error("TASK_RETRY_LIMIT", "Task retry limit reached"), requestId); return true; }
+    if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (found.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be retried"), requestId); return true; }
+    const target = body?.versionId ? ctx.version(body.versionId) : sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? AND status='failed' ORDER BY created_at DESC,id DESC LIMIT 1").get(found.id);
+    if (!target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Failed resource version not found"), requestId); return true; }
+    if (target.status !== "failed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed resource versions can be retried"), requestId); return true; }
+    if (sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(target.id)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Resource version is already being processed"), requestId); return true; }
+    let task;
     const timestamp = ctx.now();
     sqlite.transaction(() => {
-      const changed = sqlite.prepare("UPDATE tasks SET status='retrying',worker_id=NULL,finished_at=NULL,error_summary=NULL,updated_at=? WHERE id=? AND status='failed' AND retry_count < retry_limit").run(timestamp, task.id).changes;
-      if (!changed) throw Object.assign(new Error("Task is no longer retryable"), { code: "INVALID_STATE_TRANSITION" });
-      sqlite.prepare("UPDATE resources SET status='pending',updated_at=? WHERE id=? AND current_version_id=?").run(timestamp, found.id, current.id);
-      sqlite.prepare("UPDATE resource_versions SET status='pending',error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, current.id);
-      ctx.audit("retrying", "task", task.id, requestId, { resourceVersionId: current.id });
+      sqlite.prepare("UPDATE resource_versions SET status='pending',error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, target.id);
+      task = ctx.queueVersion(target.id, requestId, "manual-retry");
+      refreshResourceStatus(sqlite, found.id, timestamp);
+      ctx.audit("retry_requested", "resource_version", target.id, requestId, { taskId: task.id });
     })();
-    ctx.json(res, 202, sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id), null, requestId);
+    ctx.json(res, 202, ctx.taskView(task), null, requestId);
     return true;
   }
 
@@ -220,6 +310,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (association && method === "POST") {
     if (!ctx.resource(association[1]) || !ctx.validKb(association[2])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource or knowledge base not found"), requestId); return true; }
     sqlite.prepare("INSERT OR IGNORE INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(association[1], association[2], ctx.now());
+    ctx.audit("linked", "resource", association[1], requestId, { knowledgeBaseId: association[2] });
     ctx.json(res, 204, null, null, requestId);
     return true;
   }

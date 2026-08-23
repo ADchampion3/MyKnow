@@ -11,15 +11,6 @@ const readJson = async (url, options) => {
   return body;
 };
 
-const fileMimeType = (file) => file.type || ({ ".md": "text/markdown", ".txt": "text/plain", ".pdf": "application/pdf" }[file.name.slice(file.name.lastIndexOf(".")).toLowerCase()] || "");
-
-const fileBase64 = async (file) => {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = "";
-  for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
-  return btoa(binary);
-};
-
 export default function Page() {
   const [bases, setBases] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -76,7 +67,11 @@ export default function Page() {
     const file = event.currentTarget.file.files[0];
     if (!file) return;
     try {
-      await readJson(`${api}/api/resources`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: file.name, mimeType: fileMimeType(file), contentBase64: await fileBase64(file), knowledgeBaseId: selected.id }) });
+      const payload = new FormData();
+      payload.set("name", file.name);
+      payload.set("knowledgeBaseId", selected.id);
+      payload.set("file", file);
+      await readJson(`${api}/api/resources`, { method: "POST", body: payload });
       setMessage("已创建导入任务");
       event.currentTarget.reset();
       await load();

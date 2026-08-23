@@ -19,5 +19,12 @@ const runner = createTaskRunner({ sqlite, workerId, audit, processResource });
 runner.recoverInterruptedTasks();
 ensurePendingResourceTasks(sqlite, "startup");
 
-await runner.runOne();
-setInterval(() => { runner.runOne().catch((caught) => console.error(caught)); }, config.workerPollIntervalMs);
+let running = false;
+const poll = async () => {
+  if (running) return;
+  running = true;
+  try { await runner.runOne(); } catch (caught) { console.error(caught); }
+  finally { running = false; }
+};
+await poll();
+setInterval(poll, config.workerPollIntervalMs);

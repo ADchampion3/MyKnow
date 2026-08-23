@@ -16,6 +16,8 @@
     "check:all": "npm run check:db && npm run check:chunker && npm run check:materials && npm run check:api && npm run check:worker",
     "check:api": "node scripts/api-contract.js",
     "check:worker": "node scripts/worker-check.js",
+    "check:storage": "node scripts/storage-check.js",
+    "db:recreate": "node scripts/recreate-db.js",
     "trace:chunks": "node scripts/chunk-trace.js",
     "test": "npm run test --workspaces --if-present"
   },

@@ -20,7 +20,9 @@ const asNonNegativeInt = (value, fallback, name) => {
 };
 
 export const normalizeChunkingConfig = (value = {}) => {
-  const input = value && typeof value === "object" ? value : {};
+  if (value === null) value = {};
+  if (typeof value !== "object" || Array.isArray(value)) throw Object.assign(new Error("chunking config must be an object"), { code: "VALIDATION_ERROR" });
+  const input = value;
   const strategy = String(input.strategy ?? "auto").toLowerCase();
   if (!STRATEGIES.has(strategy)) throw Object.assign(new Error("strategy must be auto, heading, heuristic, or legacy"), { code: "VALIDATION_ERROR" });
   const parentChunkSize = asPositiveInt(input.parentChunkSize ?? input.parent_chunk_size, DEFAULT_CHUNKING_CONFIG.parentChunkSize, "parentChunkSize");

@@ -1,7 +1,9 @@
-# Sprint 3 backlog from Sprint 2 review
+# Sprint 3 backlog from the current Sprint 2 boundary
 
-- Add a direct `multipart/form-data` file upload contract while retaining JSON imports for automation.
-- Run live HTTP/HTTPS, text-PDF/MarkItDown, malformed-PDF, and oversized-response fixtures.
-- Add the required 100 mixed import/retry run and commit `artifacts/sprint2/chunk-trace.jsonl` with at least 20 trace rows.
-- Add an FTS5 capability probe with the documented `ponytail:` `LIKE` fallback when SQLite lacks FTS5.
-- Replace single-worker startup recovery with a leased worker table before multi-worker execution.
+These are intentionally outside the local single-user raw-source optimization and are not hidden acceptance debt:
+
+- Run live HTTP/PDF/MarkItDown fixture suites only if a future product decision explicitly reintroduces remote or richer document inputs.
+- Add the required 100 mixed-fixture stress run if performance evidence becomes a Sprint 3 goal.
+- Add a documented FTS5 capability probe and `ponytail:` `LIKE` fallback if SQLite portability requires it.
+- Replace single-worker startup recovery with a leased worker table before enabling multi-worker execution.
+- Consider orphan-blob garbage collection only with an explicit retention/deletion policy; the current scan is report-only.

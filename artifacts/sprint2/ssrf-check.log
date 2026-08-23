@@ -1,2 +1,2 @@
-﻿URL validation rejects localhost, loopback, private and link-local host patterns
-API and Worker validate URL independently
+SUPERSEDED 2026-08-22: URL input was removed from the Sprint 2 raw-source contract.
+No URL fetcher or SSRF surface is enabled by the current API or Worker.

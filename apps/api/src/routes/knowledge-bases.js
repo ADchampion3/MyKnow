@@ -11,7 +11,7 @@ export const handleKnowledgeBaseRoutes = ({ ctx, request }) => {
   }
   if (pathname === "/api/knowledge-bases" && method === "POST") {
     let chunkingConfig;
-    try { chunkingConfig = JSON.stringify(normalizeChunkingConfig(body?.chunkingConfig || {})); }
+    try { chunkingConfig = JSON.stringify(normalizeChunkingConfig(body?.chunkingConfig ?? {})); }
     catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     const result = ctx.collection(body, { description: body?.description || null, chunkingConfig, status: "active" });
     if (result.error) { ctx.json(res, 400, null, result.error, requestId); return true; }

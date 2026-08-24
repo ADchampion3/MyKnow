@@ -23,6 +23,28 @@ export const handleTaskRoutes = ({ ctx, request }) => {
     return true;
   }
 
+  const cancelTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
+  if (cancelTaskMatch && method === "POST") {
+    const task = db.select().from(tasks).where(eq(tasks.id, cancelTaskMatch[1])).get();
+    if (!task) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
+    if (["succeeded", "failed"].includes(task.status)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only queued or running tasks can be cancelled"), requestId); return true; }
+    const timestamp = ctx.now();
+    sqlite.transaction(() => {
+      sqlite.prepare("UPDATE tasks SET cancel_requested=1,status=CASE WHEN status IN ('queued','retrying') THEN 'failed' ELSE status END,error_code=CASE WHEN status IN ('queued','retrying') THEN 'TASK_CANCELLED' ELSE error_code END,error_summary=CASE WHEN status IN ('queued','retrying') THEN 'Task cancellation requested' ELSE error_summary END,finished_at=CASE WHEN status IN ('queued','retrying') THEN ? ELSE finished_at END,updated_at=? WHERE id=?").run(timestamp, timestamp, task.id);
+      if (task.type === "resource:process" && ["queued", "retrying"].includes(task.status)) {
+        const resourceVersionId = task.resource_version_id || (() => { try { return JSON.parse(task.payload || "{}").resourceVersionId; } catch { return null; } })();
+        const version = resourceVersionId && ctx.version(resourceVersionId);
+        if (version) {
+          sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'failed' ELSE 'indexed' END,error_summary='Task cancellation requested',updated_at=? WHERE id=?").run(timestamp, version.id);
+          refreshResourceStatus(sqlite, version.resource_id, timestamp);
+        }
+      }
+      ctx.audit("cancel_requested", "task", task.id, requestId, { status: task.status });
+    })();
+    ctx.json(res, 202, ctx.taskView(sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id)), null, requestId);
+    return true;
+  }
+
   const retryTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/retry$/);
   if (retryTaskMatch && method === "POST") {
     const task = db.select().from(tasks).where(eq(tasks.id, retryTaskMatch[1])).get();

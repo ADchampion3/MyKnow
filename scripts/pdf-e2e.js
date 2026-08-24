@@ -10,13 +10,21 @@ const defaultSource = "D:\\深入理解分布式系统 (唐伟志) (Z-Library) (
 const sourcePath = path.resolve(process.argv[2] || defaultSource);
 const runKey = `${process.pid}-${Date.now()}`;
 const port = Number(process.env.PDF_E2E_PORT || 3041);
+const evidenceRoot = path.resolve(process.env.PDF_E2E_EVIDENCE_ROOT || "artifacts/sprint2");
 const databasePath = path.resolve("apps", "api", "data", `pdf-e2e-${runKey}.db`);
-const storageDir = path.resolve("artifacts", "sprint2", `pdf-e2e-storage-${runKey}`);
-const logDir = path.resolve("artifacts", "sprint2", `pdf-e2e-logs-${runKey}`);
-const evidencePath = path.resolve("artifacts", "sprint2", `pdf-e2e-${runKey}.md`);
+const storageDir = path.resolve(evidenceRoot, `pdf-e2e-storage-${runKey}`);
+const logDir = path.resolve(evidenceRoot, `pdf-e2e-logs-${runKey}`);
+const evidencePath = path.resolve(evidenceRoot, `pdf-e2e-${runKey}.md`);
 const venvScripts = path.resolve(".venv-pdf", "Scripts");
 const venvPython = path.join(venvScripts, "python.exe");
 const base = `http://127.0.0.1:${port}`;
+const positiveTimeout = (name, fallback) => {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+  return value;
+};
+const parserTimeoutMs = positiveTimeout("PDF_E2E_PARSER_TIMEOUT_MS", 180_000);
+const taskTimeoutMs = positiveTimeout("PDF_E2E_TASK_TIMEOUT_MS", 240_000);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 
@@ -33,10 +41,11 @@ const childEnv = {
   DATABASE_URL: `file:./${path.relative(process.cwd(), databasePath).replaceAll("\\", "/")}`,
   RESOURCE_STORAGE_DIR: storageDir,
   RESOURCE_MAX_BYTES: "150000000",
-  RESOURCE_PARSER_TIMEOUT_MS: "180000",
+  RESOURCE_PARSER_TIMEOUT_MS: String(parserTimeoutMs),
   WORKER_POLL_INTERVAL_MS: "100",
   PYTHONUTF8: "1",
-  PYTHONIOENCODING: "utf-8"
+  PYTHONIOENCODING: "utf-8",
+  PDF_PYTHON_PATH: venvPython
 };
 childEnv.Path = `${venvScripts};${inheritedPath}`;
 childEnv.PATH = childEnv.Path;
@@ -76,7 +85,7 @@ const waitForHealth = async (api) => {
 };
 
 const waitForTask = async (taskId, transitions) => {
-  const deadline = Date.now() + 240_000;
+  const deadline = Date.now() + taskTimeoutMs;
   let lastStatus = null;
   let current = null;
   while (Date.now() < deadline) {
@@ -90,7 +99,7 @@ const waitForTask = async (taskId, transitions) => {
     if (["succeeded", "failed"].includes(current?.status)) return current;
     await sleep(1_000);
   }
-  throw new Error(`task ${taskId} did not finish within 240 seconds`);
+  throw new Error(`task ${taskId} did not finish within ${Math.round(taskTimeoutMs / 1000)} seconds`);
 };
 
 const pickSearchQuery = (text) => {
@@ -113,6 +122,8 @@ const result = {
   environment: {
     python: spawnSync(venvPython, ["--version"], { encoding: "utf8" }).stdout.trim(),
     port,
+    parserTimeoutMs,
+    taskTimeoutMs,
     databasePath,
     storageDir,
     logDir
@@ -147,6 +158,8 @@ try {
   form.set("name", path.basename(sourcePath));
   form.set("knowledgeBaseId", knowledgeBaseId);
   form.set("file", new Blob([sourceBytes], { type: "application/pdf" }), path.basename(sourcePath));
+  form.set("ocrMode", process.env.PDF_E2E_OCR_MODE || "auto");
+  form.set("ocrProvider", process.env.PDF_E2E_OCR_PROVIDER || "local");
   const imported = await request("/api/resources", { method: "POST", body: form });
   assert.equal(imported.response.status, 201, JSON.stringify(imported.body));
   const resourceId = imported.body.data.resource.id;
@@ -199,8 +212,10 @@ try {
     sha256: sha256(Buffer.from(canonicalText, "utf8")),
     chars: Array.from(canonicalText).length,
     blocks: canonical.body.data.blocks?.length || 0,
-    head: canonicalText.slice(0, 600)
+    head: canonicalText.slice(0, 600),
+    pages: canonical.body.data.pages?.map((page) => ({ pageNumber: page.pageNumber, status: page.status, blockCount: page.blocks?.length || 0 })) || []
   };
+  if ((process.env.PDF_E2E_OCR_MODE || "auto") !== "off") assert.ok(result.canonical.pages.length && result.canonical.pages.every((page) => page.status === "succeeded"), "OCR canonical artifact has incomplete pages");
 
   for (const query of pickSearchQuery(canonicalText)) {
     const search = await request(`/api/search?q=${encodeURIComponent(query)}&knowledgeBaseId=${encodeURIComponent(knowledgeBaseId)}`);

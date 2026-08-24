@@ -5,9 +5,11 @@
 ## 目标
 
 - 接收 JSON 文本和 native `multipart/form-data` 的本地 `.md`、`.txt`、`.pdf`。
+- PDF 处理支持显式 `ocrMode`（`auto`、`off`、`force`）和 `ocrProvider`（`local`、`cloud`、`paddleocr`）；选择随版本、任务和处理 run 持久化。
 - 为每次提交建立不可变 `resource_versions`；原始字节以 SHA-256 内容寻址保存。
 - 用 `current_version_id` 表示最近一次成功索引的版本；默认搜索只看当前版本，历史版本必须显式指定。
 - 解析和索引采用 build-then-swap：新版本成功前保留旧活动索引。
+- OCR canonical artifact 保留页码、页面终态、text/table/formula 区块、warnings 和页码范围 locator；失败不替换旧 FTS。
 - 任务最多三次总尝试；只有瞬态错误自动重试，手工重试创建新任务并保留旧记录。
 - 归档/恢复只改变可见性和任务状态，不删除原始材料、版本或处理记录。
 
@@ -22,9 +24,10 @@
 ## API 约定
 
 - `POST /api/resources`: JSON `{ name, knowledgeBaseId, content }` 或 multipart `{ name, knowledgeBaseId, file }`。
+- PDF multipart 还必须提供 `ocrMode` 和 `ocrProvider`；`auto` 为 OCR-first/native fallback，`off` 为 native-only，`force` 禁止 native fallback。
 - `POST /api/resources/:id/versions`: 创建后续版本。
 - `PATCH /api/resources/:id`: 只修改显示名称。
-- `POST /api/resources/:id/archive|restore`、`POST /api/resources/:id/rebuild`、`POST /api/resources/:id/retry`：归档、全量重建、失败版本手工重试。
+- `POST /api/resources/:id/archive|restore`、`POST /api/resources/:id/rebuild`、`POST /api/resources/:id/retry`、`POST /api/tasks/:id/cancel`：归档、全量重建、失败版本手工重试和取消任务。
 - `Idempotency-Key` 可选；同 key 同请求返回原结果，不同请求返回冲突。没有 key 的重复提交始终创建独立版本。
 - DTO 不暴露存储键和 canonical 路径；下载和内部读取会重新校验 SHA-256 与字节数。
 
@@ -32,7 +35,7 @@ URL、服务器路径、Base64 和多用户权限不属于当前输入或安全�
 
 ## 数据和迁移
 
-当前 schema 标记为 `sprint2-raw-v4`。旧实验数据库不会兼容迁移；启动时返回 `DATABASE_RECREATE_REQUIRED`，使用以下命令建立干净数据库：
+当前 schema 标记为 `sprint2-pdf-ocr-v2`。旧实验数据库不会兼容迁移；启动时返回 `DATABASE_RECREATE_REQUIRED`，使用以下命令建立干净数据库：
 
 ```text
 npm run db:recreate -- --confirm D:\MyKnow\data\myknow.db
@@ -43,9 +46,10 @@ npm run db:recreate -- --confirm D:\MyKnow\data\myknow.db
 ## 验收
 
 - `npm run check:all`
+- `npm run check:ocr`
 - `npm run check:storage`
 - `npm test`
 - `npm --workspace apps/web exec next build`
 - `node --check` touched JavaScript modules
 
-逐字段请求/响应、状态转变、迁移和存储规则见 [`docs/SPRINT2_RAW_SOURCE_CONTRACT.md`](docs/SPRINT2_RAW_SOURCE_CONTRACT.md)。本轮证据见 [`artifacts/sprint2/acceptance-report.md`](artifacts/sprint2/acceptance-report.md)。
+逐字段请求/响应、状态转变、迁移和存储规则见 [`docs/SPRINT2_RAW_SOURCE_CONTRACT.md`](docs/SPRINT2_RAW_SOURCE_CONTRACT.md)。PDF OCR 细节见 [`docs/SPRINT2_PDF_OCR.md`](docs/SPRINT2_PDF_OCR.md)。本轮基线证据见 [`artifacts/sprint2/acceptance-report.md`](artifacts/sprint2/acceptance-report.md)，OCR 扩展证据见 [`artifacts/sprint2/pdf-ocr-evidence.md`](artifacts/sprint2/pdf-ocr-evidence.md)。

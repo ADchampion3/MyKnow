@@ -273,4 +273,4 @@ npm run trace:chunks
 - 表结构：[`packages/db/src/schema.js`](../packages/db/src/schema.js)
 - 分块 trace：[`artifacts/sprint2/chunk-trace.jsonl`](../artifacts/sprint2/chunk-trace.jsonl)
 
-当前 raw-source 合同不接收公网 URL；PDF/MarkItDown 与混合 fixture 的扩展证据属于 Sprint 3 选择性工作，见 [`SPRINT3_BACKLOG.md`](../SPRINT3_BACKLOG.md)。
+当前 raw-source 合同不接收公网 URL；PDF native/OCR 与混合 fixture 的扩展证据属于 Sprint 2，见 [`SPRINT2_PDF_OCR.md`](SPRINT2_PDF_OCR.md) 和 [`artifacts/sprint2/pdf-ocr-evidence.md`](../artifacts/sprint2/pdf-ocr-evidence.md)。

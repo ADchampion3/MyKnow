@@ -14,7 +14,7 @@ Copy `.env.example` to `.env` when custom configuration is needed. The API expos
 
 ## Sprint 2 resource flow
 
-Import text through `POST /api/resources` with JSON `{ name, knowledgeBaseId, content }`, or upload a local `.md`, `.txt`, or `.pdf` through `multipart/form-data` using fields `name`, `knowledgeBaseId`, and `file`. Add a new immutable version through `POST /api/resources/:id/versions`; use `Idempotency-Key` only when a transport retry must return the original result. URL fetching and Base64 imports are intentionally not part of the Sprint 2 contract. The Worker stores immutable source bytes, records a processing run and canonical artifact, applies the adaptive heading/heuristic/recursive chunker, creates parent/child chunks, and indexes only child chunks in SQLite FTS5. Search uses `GET /api/search?q=...&knowledgeBaseId=...`; default results are limited to each resource's last successful current version, while an explicit `resourceVersionId` searches history. Resource files and canonical artifacts are stored under `RESOURCE_STORAGE_DIR`; keep that directory server-side.
+Import text through `POST /api/resources` with JSON `{ name, knowledgeBaseId, content }`, or upload a local `.md`, `.txt`, or `.pdf` through `multipart/form-data` using fields `name`, `knowledgeBaseId`, and `file`. PDF imports must also choose `ocrMode` (`auto`, `off`, or `force`) and `ocrProvider` (`local`, `cloud`, or `paddleocr`). Add a new immutable version through `POST /api/resources/:id/versions`; use `Idempotency-Key` only when a transport retry must return the original result. URL fetching and Base64 imports are intentionally not part of the contract. The Worker stores immutable source bytes, records a processing run and canonical artifact, applies the adaptive heading/heuristic/recursive chunker, creates parent/child chunks, and indexes only child chunks in SQLite FTS5. OCR artifacts contain page/block metadata; table blocks use GFM Markdown and formula blocks use LaTeX. Search uses `GET /api/search?q=...&knowledgeBaseId=...`; default results are limited to each resource's last successful current version, while an explicit `resourceVersionId` searches history. Resource files and canonical artifacts are stored under `RESOURCE_STORAGE_DIR`; keep that directory server-side.
 
 Processing controls are available through `POST /api/resources/:id/reprocess`, `POST /api/resources/rebuild`, `GET /api/resources/:id/processing-runs`, `POST /api/resources/:id/chunk-preview`, `POST /api/resources/:id/archive`, and `POST /api/resources/:id/restore`. Rebuild uses build-then-swap, so an old successful index remains searchable while a replacement run is built. Resource states are `pending`, `processing`, `indexed`, `degraded`, `failed`, and `archived`; PDF parsing remains best-effort.
 
@@ -22,6 +22,7 @@ The database schema is a deliberate Sprint 2 break. A fresh empty database is re
 
 The complete chunking contract is documented in [`docs/CHUNKING_MECHANISM.md`](docs/CHUNKING_MECHANISM.md).
 The raw-source contract and state machine are documented in [`docs/SPRINT2_RAW_SOURCE_CONTRACT.md`](docs/SPRINT2_RAW_SOURCE_CONTRACT.md).
+The Sprint 2 PDF OCR contract, local setup, focused checks, and full-chain evidence flow are documented in [`docs/SPRINT2_PDF_OCR.md`](docs/SPRINT2_PDF_OCR.md), with focused evidence in [`artifacts/sprint2/pdf-ocr-evidence.md`](artifacts/sprint2/pdf-ocr-evidence.md).
 
 For large PDFs, `RESOURCE_PARSER_TIMEOUT_MS` controls the MarkItDown subprocess timeout (default 120 seconds).
 
@@ -65,4 +66,4 @@ node --check apps/web/src/index.js
 node --check apps/worker/src/index.js
 ```
 
-The Sprint 1 acceptance plan and evidence requirements are in `SPRINT1_PLAN.md`. RAG and Agent/Wiki changes remain deferred; Office, OCR/VLM, ASR, and file-URL adapters remain outside this optimization pass.
+The Sprint 1 acceptance plan and evidence requirements are in `SPRINT1_PLAN.md`. RAG and Agent/Wiki changes remain deferred; Office, ASR, and file-URL adapters remain outside this optimization pass.

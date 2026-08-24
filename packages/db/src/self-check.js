@@ -13,7 +13,7 @@ const now = new Date().toISOString();
 sqlite.prepare("INSERT INTO knowledge_bases (id,name,status,created_at,updated_at) VALUES (?,?,?,?,?)").run(crypto.randomUUID(), "check", "active", now, now);
 assert.throws(() => sqlite.prepare("INSERT INTO knowledge_bases (id,name,status,created_at,updated_at) VALUES (?,?,?,?,?)").run(crypto.randomUUID(), "   ", "active", now, now));
 assert.throws(() => safeStoragePath("./data/resources", "../outside"));
-assert.equal(sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get().value, "sprint2-raw-v4");
+assert.equal(sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get().value, "sprint2-pdf-ocr-v2");
 assert.ok(sqlite.prepare("PRAGMA index_list(tasks)").all().some((index) => index.name === "tasks_resource_active_idx"));
 sqlite.close();
 

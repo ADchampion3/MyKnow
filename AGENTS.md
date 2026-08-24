@@ -52,3 +52,17 @@ Apply this ladder after understanding the problem. Read the task and trace the r
 ## Definition of done
 
 A change is done only when the relevant automated checks pass, the documented startup or user flow is reproducible from an empty database, and the evidence path is recorded. If a requirement is deferred, record it explicitly in the next Sprint backlog instead of weakening its acceptance threshold.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as Markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+This repo uses the default triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.

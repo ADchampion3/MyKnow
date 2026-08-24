@@ -3,3 +3,4 @@ export { migrate } from "./database/migrations.js";
 export * from "./schema.js";
 export * from "./resources.js";
 export * from "./chunker.js";
+export * from "./ocr.js";

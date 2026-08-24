@@ -1,12 +1,31 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chunkDocument, contentStorageKey, mimeForExtension, normalizeChunkingConfig, persistBytes, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
+import { chunkDocument, contentStorageKey, mimeForExtension, normalizeChunkingConfig, normalizeOcrProcessingRequest, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
 
 const textMimes = new Set(["text/plain", "text/markdown"]);
 const resourceStatuses = new Set(["pending", "processing", "indexed", "degraded", "failed", "archived"]);
 
 const fail = (message, code = "VALIDATION_ERROR") => Object.assign(new Error(message), { code });
 const safeFilename = (value) => path.posix.basename(String(value || "").replaceAll("\\", "/")).slice(0, 255);
+const requestField = (body, ...names) => names.map((name) => body?.[name]).find((value) => value !== undefined);
+const parseOcrCapabilities = (value) => {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    try { return JSON.parse(trimmed); } catch { throw fail("ocrCapabilities must be valid JSON", "OCR_CAPABILITIES_INVALID"); }
+  }
+  return value;
+};
+const ocrRequestFor = (body, isPdf, stored = null) => {
+  const hasOverrides = ["ocrMode", "ocr_mode", "mode", "ocrProvider", "ocr_provider", "provider", "ocrCapabilities", "ocr_capabilities", "capabilities"].some((name) => body?.[name] !== undefined);
+  if (!hasOverrides && stored) return processingRequestFromVersion(stored, { isPdf });
+  return normalizeOcrProcessingRequest({
+    ocrMode: requestField(body, "ocrMode", "ocr_mode", "mode"),
+    ocrProvider: requestField(body, "ocrProvider", "ocr_provider", "provider"),
+    ocrCapabilities: parseOcrCapabilities(requestField(body, "ocrCapabilities", "ocr_capabilities", "capabilities"))
+  }, { isPdf });
+};
 const readVerified = (root, key, expectedSize, expectedSha, label) => {
   let bytes;
   try { bytes = readBytes(root, key); } catch { throw fail(`${label} is missing`, "SOURCE_INTEGRITY_FAILED"); }
@@ -67,8 +86,9 @@ const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId
   const input = parseImportInput(body, name);
   if (!input.bytes.length || input.bytes.length > config.resourceMaxBytes) throw fail("source size is invalid");
   if (existing && existing.source_type !== input.sourceType) throw fail("a resource cannot change source type", "INVALID_STATE_TRANSITION");
+  const processingRequest = ocrRequestFor(body, input.mimeType === "application/pdf");
   const fingerprint = sha256(input.bytes);
-  const requestFingerprint = sha256(JSON.stringify({ resourceId: existing?.id || null, kbId, name, sourceType: input.sourceType, mimeType: input.mimeType, originalFilename: input.originalFilename, contentSha256: fingerprint }));
+  const requestFingerprint = sha256(JSON.stringify({ resourceId: existing?.id || null, kbId, name, sourceType: input.sourceType, mimeType: input.mimeType, originalFilename: input.originalFilename, contentSha256: fingerprint, processingRequest }));
   if (idempotencyKey) {
     if (idempotencyKey.length > 200) throw fail("Idempotency-Key is too long");
     const prior = sqlite.prepare("SELECT * FROM resource_versions WHERE idempotency_key=?").get(idempotencyKey);
@@ -85,7 +105,7 @@ const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId
   let task;
   sqlite.transaction(() => {
     if (!existing) sqlite.prepare("INSERT INTO resources (id,name,source_type,status,current_version_id,created_at,updated_at) VALUES (?,?,?,'pending',NULL,?,?)").run(targetResourceId, name, input.sourceType, timestamp, timestamp);
-    sqlite.prepare("INSERT INTO resource_versions (id,resource_id,content_sha256,storage_key,mime_type,byte_size,original_filename,chunking_config,status,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'pending',?,?,?,?)").run(versionId, targetResourceId, fingerprint, storageKey, input.mimeType, input.bytes.length, input.originalFilename, JSON.stringify(chunkingFor(sqlite, targetResourceId, kbId)), idempotencyKey, requestFingerprint, timestamp, timestamp);
+    sqlite.prepare("INSERT INTO resource_versions (id,resource_id,content_sha256,storage_key,mime_type,byte_size,original_filename,chunking_config,ocr_mode,ocr_provider,ocr_capabilities,status,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)").run(versionId, targetResourceId, fingerprint, storageKey, input.mimeType, input.bytes.length, input.originalFilename, JSON.stringify(chunkingFor(sqlite, targetResourceId, kbId)), processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), idempotencyKey, requestFingerprint, timestamp, timestamp);
     if (!existing) sqlite.prepare("INSERT INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(targetResourceId, kbId, timestamp);
     task = ctx.queueVersion(versionId, requestId, existing ? "new-version" : "import");
     ctx.audit("imported", "resource_version", versionId, requestId, { resourceId: targetResourceId, sourceType: input.sourceType });
@@ -162,7 +182,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     if (archiveMatch[2] === "archive") {
       sqlite.transaction(() => {
         sqlite.prepare("UPDATE resources SET status='archived',archived_at=?,updated_at=? WHERE id=?").run(timestamp, timestamp, resource.id);
-        sqlite.prepare("UPDATE tasks SET status='failed',error_code='RESOURCE_ARCHIVED',error_summary='Resource archived',finished_at=?,updated_at=? WHERE resource_version_id IN (SELECT id FROM resource_versions WHERE resource_id=?) AND status IN ('queued','retrying')").run(timestamp, timestamp, resource.id);
+        sqlite.prepare("UPDATE tasks SET cancel_requested=1,status=CASE WHEN status IN ('queued','retrying') THEN 'failed' ELSE status END,error_code=CASE WHEN status IN ('queued','retrying') THEN 'RESOURCE_ARCHIVED' ELSE error_code END,error_summary=CASE WHEN status IN ('queued','retrying') THEN 'Resource archived' ELSE error_summary END,finished_at=CASE WHEN status IN ('queued','retrying') THEN ? ELSE finished_at END,updated_at=? WHERE resource_version_id IN (SELECT id FROM resource_versions WHERE resource_id=?) AND status IN ('queued','running','retrying')").run(timestamp, timestamp, resource.id);
         ctx.audit("archived", "resource", resource.id, requestId);
       })();
       ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
@@ -239,6 +259,24 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     if (found.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be processed"), requestId); return true; }
     const target = body?.versionId ? ctx.version(body.versionId) : ctx.version(found.current_version_id);
     if (!target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource version not found"), requestId); return true; }
+    let processingRequest;
+    try { processingRequest = ocrRequestFor(body, target.mime_type === "application/pdf", target); }
+    catch (caught) { ctx.json(res, 400, null, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
+    if (idempotencyKey && idempotencyKey.length > 200) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "Idempotency-Key is too long"), requestId); return true; }
+    const processingFingerprint = sha256(JSON.stringify({ versionId: target.id, processingRequest, chunkingConfig: body?.chunkingConfig ?? null }));
+    if (idempotencyKey) {
+      const priorTasks = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? ORDER BY created_at DESC,id DESC").all(target.id);
+      for (const prior of priorTasks) {
+        try {
+          const payload = JSON.parse(prior.payload || "{}");
+          if (payload.idempotencyKey === idempotencyKey) {
+            if (payload.requestFingerprint !== processingFingerprint) { ctx.json(res, 409, null, ctx.error("IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used for different OCR settings"), requestId); return true; }
+            ctx.json(res, 202, ctx.taskView(prior), null, requestId);
+            return true;
+          }
+        } catch {}
+      }
+    }
     const activeTask = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') ORDER BY created_at DESC,id DESC LIMIT 1").get(target.id);
     if (activeTask) { ctx.json(res, 202, ctx.taskView(activeTask), null, requestId); return true; }
     let chunkingConfig = null;
@@ -249,9 +287,9 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     const timestamp = ctx.now();
     let task;
     sqlite.transaction(() => {
-      sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'pending' ELSE 'indexed' END,chunking_config=COALESCE(?,chunking_config),error_summary=NULL,updated_at=? WHERE id=?").run(chunkingConfig, timestamp, target.id);
+      sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'pending' ELSE 'indexed' END,chunking_config=COALESCE(?,chunking_config),ocr_mode=?,ocr_provider=?,ocr_capabilities=?,error_summary=NULL,updated_at=? WHERE id=?").run(chunkingConfig, processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), timestamp, target.id);
       refreshResourceStatus(sqlite, found.id, timestamp);
-      task = ctx.queueVersion(target.id, requestId, "reprocess");
+      task = ctx.queueVersion(target.id, requestId, "reprocess", idempotencyKey ? { idempotencyKey, requestFingerprint: processingFingerprint } : null);
       ctx.audit("reprocess_requested", "resource_version", target.id, requestId, { taskId: task.id });
     })();
     ctx.json(res, 202, ctx.taskView(task), null, requestId);

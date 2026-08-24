@@ -19,6 +19,14 @@ export function loadConfig(env = process.env) {
     resourceParserTimeoutMs: positiveInt("RESOURCE_PARSER_TIMEOUT_MS", env.RESOURCE_PARSER_TIMEOUT_MS, 120_000),
     modelProvider: provider,
     modelApiBaseUrl: env.MODEL_API_BASE_URL || "",
+    modelApiKey: env.MODEL_API_KEY || "",
+    paddleOcrJobUrl: env.PADDLE_OCR_JOB_URL || "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+    paddleOcrToken: env.PADDLE_OCR_TOKEN || "",
+    paddleOcrModel: env.PADDLE_OCR_MODEL || "PaddleOCR-VL-1.6",
+    paddleOcrPollIntervalMs: positiveInt("PADDLE_OCR_POLL_INTERVAL_MS", env.PADDLE_OCR_POLL_INTERVAL_MS, 5000),
+    paddleOcrMaxConcurrency: positiveInt("PADDLE_OCR_MAX_CONCURRENCY", env.PADDLE_OCR_MAX_CONCURRENCY, 1),
+    pdfPythonPath: env.PDF_PYTHON_PATH || "python",
+    ocrMaxPages: positiveInt("OCR_MAX_PAGES", env.OCR_MAX_PAGES, 500),
     hasModelApiKey: Boolean(env.MODEL_API_KEY)
   };
 }

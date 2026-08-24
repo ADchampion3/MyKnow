@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { processingRequestFromVersion } from "./ocr.js";
 
 const supported = new Map([
   [".md", "text/markdown"],
@@ -87,14 +88,15 @@ export const refreshResourceStatus = (sqlite, resourceId, timestamp = now()) => 
 };
 
 export const ensurePendingResourceTasks = (sqlite, reason = "pending") => sqlite.transaction(() => {
-  const versions = sqlite.prepare("SELECT rv.id,rv.resource_id FROM resource_versions rv JOIN resources r ON r.id=rv.resource_id WHERE rv.status='pending' AND r.status <> 'archived'").all();
+  const versions = sqlite.prepare("SELECT rv.*,r.status AS resource_status FROM resource_versions rv JOIN resources r ON r.id=rv.resource_id WHERE rv.status='pending' AND r.status <> 'archived'").all();
   let queued = 0;
   for (const version of versions) {
     const activeTask = sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(version.id);
     if (activeTask) continue;
     const taskId = crypto.randomUUID();
     const timestamp = now();
-    sqlite.prepare("INSERT INTO tasks (id,type,resource_version_id,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,?,'queued',0,3,0,?,?)").run(taskId, "resource:process", version.id, JSON.stringify({ reason }), timestamp, timestamp);
+    const processingRequest = processingRequestFromVersion(version, { isPdf: version.mime_type === "application/pdf" });
+    sqlite.prepare("INSERT INTO tasks (id,type,resource_version_id,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,?,'queued',0,3,0,?,?)").run(taskId, "resource:process", version.id, JSON.stringify({ reason, resourceVersionId: version.id, processingRequest }), timestamp, timestamp);
     sqlite.prepare("INSERT INTO audit_logs (id,event_type,entity_type,entity_id,request_id,metadata,created_at) VALUES (?,?,?,?,?,?,?)").run(crypto.randomUUID(), "queued", "task", taskId, null, JSON.stringify({ resourceVersionId: version.id, reason }), timestamp);
     queued += 1;
   }

@@ -4,3 +4,4 @@ export * from "./schema.js";
 export * from "./resources.js";
 export * from "./chunker.js";
 export * from "./ocr.js";
+export * from "./wiki.js";

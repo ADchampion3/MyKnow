@@ -4,6 +4,15 @@ import { chunkDocument, normalizeChunkingConfig, now, persistBytes, processingRe
 const archivedError = () => Object.assign(new Error("resource is archived"), { code: "RESOURCE_ARCHIVED" });
 
 export const createResourceProcessor = ({ config, sqlite, materialReader, audit }) => {
+  const queueImpactScan = (resourceVersionId) => {
+    const active = sqlite.prepare("SELECT id FROM tasks WHERE type='wiki:impact-scan' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(resourceVersionId);
+    if (active) return active.id;
+    const taskId = crypto.randomUUID();
+    const timestamp = now();
+    sqlite.prepare("INSERT INTO tasks (id,type,resource_version_id,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,?,'queued',0,3,0,?,?)").run(taskId, "wiki:impact-scan", resourceVersionId, JSON.stringify({ resourceVersionId, reason: "resource-indexed" }), timestamp, timestamp);
+    audit("queued", "task", taskId, { type: "wiki:impact-scan", resourceVersionId, reason: "resource-indexed" });
+    return taskId;
+  };
   const createProcessingRun = (version, chunkingConfig, processingRequest) => {
     const resource = sqlite.prepare("SELECT * FROM resources WHERE id=?").get(version.resource_id);
     if (!resource || resource.status === "archived") throw archivedError();
@@ -92,6 +101,8 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       sqlite.prepare("UPDATE chunks SET status='superseded' WHERE processing_run_id=? AND status='active'").run(previousRun);
       sqlite.prepare("UPDATE processing_runs SET status='superseded',updated_at=? WHERE id=? AND status='indexed'").run(timestamp, previousRun);
     }
+    queueImpactScan(version.id);
+    audit("indexed", "processing_run", runId, { resourceVersionId: version.id, parents: document.parents.length, children: document.children.length, strategy: document.strategy });
   })();
 
   const processResource = async (task) => {
@@ -131,7 +142,6 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       if (!document.children.length) throw Object.assign(new Error("parsed content produced no child chunks"), { code: "PARSE_FAILED" });
       const artifact = writeCanonicalArtifact(version, runId, parsed, document);
       persistProcessedDocument(version, runId, previousRunId, parsed, document, artifact, started, processingRequest);
-      audit("indexed", "processing_run", runId, { resourceVersionId: version.id, parents: document.parents.length, children: document.children.length, strategy: document.strategy });
     } catch (caught) {
       if (runId) {
         const timestamp = now();

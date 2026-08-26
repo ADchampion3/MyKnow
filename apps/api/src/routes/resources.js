@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chunkDocument, contentStorageKey, mimeForExtension, normalizeChunkingConfig, normalizeOcrProcessingRequest, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
+import { chunkDocument, contentStorageKey, externalWikiMode, mimeForExtension, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
 
 const textMimes = new Set(["text/plain", "text/markdown"]);
 const resourceStatuses = new Set(["pending", "processing", "indexed", "degraded", "failed", "archived"]);
@@ -65,7 +65,10 @@ const resourcePayload = (ctx, row) => {
   if (!row) return null;
   const versions = ctx.sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(row.id).map((version) => versionPayload(ctx, version));
   const latest = versions[0];
-  return { ...ctx.resourceView(row), currentVersion: versions.find((version) => version.id === row.current_version_id) || null, latestVersion: latest || null, versions, task: latest ? taskFor(ctx, latest.id) : null };
+  const result = { ...ctx.resourceView(row), currentVersion: versions.find((version) => version.id === row.current_version_id) || null, latestVersion: latest || null, versions, task: latest ? taskFor(ctx, latest.id) : null };
+  result.wikiMode = row.wiki_mode ? externalWikiMode(row.wiki_mode) : null;
+  result.wikiModeByKnowledgeBase = ctx.sqlite.prepare("SELECT rkb.knowledge_base_id AS knowledgeBaseId, CASE WHEN r.wiki_mode IS NULL THEN kb.wiki_default_mode ELSE r.wiki_mode END AS mode FROM resource_knowledge_bases rkb JOIN resources r ON r.id=rkb.resource_id JOIN knowledge_bases kb ON kb.id=rkb.knowledge_base_id WHERE r.id=? ORDER BY rkb.knowledge_base_id").all(row.id).map((item) => ({ ...item, mode: externalWikiMode(item.mode) }));
+  return result;
 };
 
 const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId = null }) => {
@@ -87,6 +90,11 @@ const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId
   if (!input.bytes.length || input.bytes.length > config.resourceMaxBytes) throw fail("source size is invalid");
   if (existing && existing.source_type !== input.sourceType) throw fail("a resource cannot change source type", "INVALID_STATE_TRANSITION");
   const processingRequest = ocrRequestFor(body, input.mimeType === "application/pdf");
+  let initialWikiMode = null;
+  if (!existing && (body?.wikiMode !== undefined || body?.wiki_mode !== undefined)) {
+    try { initialWikiMode = normalizeWikiMode(body.wikiMode ?? body.wiki_mode, { nullable: true }); }
+    catch (caught) { throw fail(caught.message); }
+  }
   const fingerprint = sha256(input.bytes);
   const requestFingerprint = sha256(JSON.stringify({ resourceId: existing?.id || null, kbId, name, sourceType: input.sourceType, mimeType: input.mimeType, originalFilename: input.originalFilename, contentSha256: fingerprint, processingRequest }));
   if (idempotencyKey) {
@@ -104,7 +112,7 @@ const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId
   const versionId = crypto.randomUUID();
   let task;
   sqlite.transaction(() => {
-    if (!existing) sqlite.prepare("INSERT INTO resources (id,name,source_type,status,current_version_id,created_at,updated_at) VALUES (?,?,?,'pending',NULL,?,?)").run(targetResourceId, name, input.sourceType, timestamp, timestamp);
+    if (!existing) sqlite.prepare("INSERT INTO resources (id,name,source_type,wiki_mode,status,current_version_id,created_at,updated_at) VALUES (?,?,?,?,'pending',NULL,?,?)").run(targetResourceId, name, input.sourceType, initialWikiMode, timestamp, timestamp);
     sqlite.prepare("INSERT INTO resource_versions (id,resource_id,content_sha256,storage_key,mime_type,byte_size,original_filename,chunking_config,ocr_mode,ocr_provider,ocr_capabilities,status,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)").run(versionId, targetResourceId, fingerprint, storageKey, input.mimeType, input.bytes.length, input.originalFilename, JSON.stringify(chunkingFor(sqlite, targetResourceId, kbId)), processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), idempotencyKey, requestFingerprint, timestamp, timestamp);
     if (!existing) sqlite.prepare("INSERT INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(targetResourceId, kbId, timestamp);
     task = ctx.queueVersion(versionId, requestId, existing ? "new-version" : "import");
@@ -206,11 +214,25 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (resourceMatch && method === "PATCH") {
     const resource = ctx.resource(resourceMatch[1]);
     if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    const name = ctx.inputName(body);
+    const writable = new Set(["name", "wikiMode", "wiki_mode"]);
+    const unsupported = Object.keys(body || {}).filter((key) => !writable.has(key));
+    if (unsupported.length) { ctx.json(res, 409, null, ctx.error("RESOURCE_READ_ONLY", "Only display name and wiki mode can be changed; source content is immutable"), requestId); return true; }
+    const name = body?.name === undefined ? resource.name : ctx.inputName(body);
     if (!name) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "name must be 1-120 characters"), requestId); return true; }
-    sqlite.prepare("UPDATE resources SET name=?,updated_at=? WHERE id=?").run(name, ctx.now(), resource.id);
-    ctx.audit("renamed", "resource", resource.id, requestId, { name });
+    let wikiMode = resource.wiki_mode;
+    if (body?.wikiMode !== undefined || body?.wiki_mode !== undefined) {
+      try { wikiMode = normalizeWikiMode(body.wikiMode ?? body.wiki_mode, { nullable: true }); }
+      catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    }
+    sqlite.prepare("UPDATE resources SET name=?,wiki_mode=?,updated_at=? WHERE id=?").run(name, wikiMode, ctx.now(), resource.id);
+    ctx.audit("updated", "resource", resource.id, requestId, { nameChanged: name !== resource.name, wikiMode: wikiMode ? externalWikiMode(wikiMode) : null });
     ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
+    return true;
+  }
+  if (resourceMatch && method === "DELETE") {
+    const resource = ctx.resource(resourceMatch[1]);
+    if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    ctx.json(res, 409, null, ctx.error("RESOURCE_READ_ONLY", "Original resources cannot be deleted; archive them instead"), requestId);
     return true;
   }
   if (resourceMatch && method === "GET") {

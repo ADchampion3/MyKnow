@@ -6,7 +6,7 @@ const timestamps = {
 };
 
 export const knowledgeBases = sqliteTable("knowledge_bases", {
-  id: text("id").primaryKey(), name: text("name").notNull(), description: text("description"), chunkingConfig: text("chunking_config"), status: text("status").notNull().default("active"), ...timestamps
+  id: text("id").primaryKey(), name: text("name").notNull(), description: text("description"), chunkingConfig: text("chunking_config"), wikiDefaultMode: text("wiki_default_mode").notNull().default("enabled"), status: text("status").notNull().default("active"), ...timestamps
 });
 export const spaces = sqliteTable("spaces", {
   id: text("id").primaryKey(), knowledgeBaseId: text("knowledge_base_id").notNull(), name: text("name").notNull(), status: text("status").notNull().default("active"), ...timestamps
@@ -24,7 +24,7 @@ export const auditLogs = sqliteTable("audit_logs", {
   id: text("id").primaryKey(), eventType: text("event_type").notNull(), entityType: text("entity_type").notNull(), entityId: text("entity_id").notNull(), requestId: text("request_id"), metadata: text("metadata"), createdAt: text("created_at").notNull()
 });
 export const resources = sqliteTable("resources", {
-  id: text("id").primaryKey(), name: text("name").notNull(), sourceType: text("source_type").notNull(), status: text("status").notNull().default("pending"), currentVersionId: text("current_version_id"), archivedAt: text("archived_at"), ...timestamps
+  id: text("id").primaryKey(), name: text("name").notNull(), sourceType: text("source_type").notNull(), wikiMode: text("wiki_mode"), status: text("status").notNull().default("pending"), currentVersionId: text("current_version_id"), archivedAt: text("archived_at"), ...timestamps
 });
 export const resourceVersions = sqliteTable("resource_versions", {
   id: text("id").primaryKey(), resourceId: text("resource_id").notNull(), contentSha256: text("content_sha256").notNull(), storageKey: text("storage_key").notNull(), mimeType: text("mime_type").notNull(), byteSize: integer("byte_size").notNull(), originalFilename: text("original_filename"), title: text("title"), parserName: text("parser_name"), parserVersion: text("parser_version"), parseDurationMs: integer("parse_duration_ms"), chunkingConfig: text("chunking_config"), ocrMode: text("ocr_mode").notNull().default("off"), ocrProvider: text("ocr_provider"), ocrCapabilities: text("ocr_capabilities"), activeProcessingRunId: text("active_processing_run_id"), status: text("status").notNull().default("pending"), errorSummary: text("error_summary"), idempotencyKey: text("idempotency_key"), requestFingerprint: text("request_fingerprint"), ...timestamps
@@ -40,4 +40,23 @@ export const resourceKnowledgeBases = sqliteTable("resource_knowledge_bases", {
 });
 export const chunks = sqliteTable("chunks", {
   id: text("id").primaryKey(), resourceVersionId: text("resource_version_id").notNull(), processingRunId: text("processing_run_id").notNull(), parentChunkId: text("parent_chunk_id"), chunkType: text("chunk_type").notNull().default("text"), sequence: integer("sequence").notNull(), content: text("content").notNull(), contextHeader: text("context_header"), startOffset: integer("start_offset").notNull(), endOffset: integer("end_offset").notNull(), locator: text("locator").notNull(), strategy: text("strategy").notNull(), forcedSplit: integer("forced_split").notNull().default(0), status: text("status").notNull().default("active"), createdAt: text("created_at").notNull()
+});
+
+export const wikiPages = sqliteTable("wiki_pages", {
+  id: text("id").primaryKey(), knowledgeBaseId: text("knowledge_base_id").notNull(), spaceId: text("space_id"), parentPageId: text("parent_page_id"), slug: text("slug").notNull(), title: text("title").notNull(), pageType: text("page_type").notNull(), status: text("status").notNull().default("active"), currentVersionId: text("current_version_id"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const wikiPageVersions = sqliteTable("wiki_page_versions", {
+  id: text("id").primaryKey(), pageId: text("page_id").notNull(), parentVersionId: text("parent_version_id"), templateVersionId: text("template_version_id"), contentMarkdown: text("content_markdown").notNull(), contentSha256: text("content_sha256").notNull(), changeSummary: text("change_summary"), restoreOfVersionId: text("restore_of_version_id"), createdAt: text("created_at").notNull()
+});
+export const wikiPageBlocks = sqliteTable("wiki_page_blocks", {
+  id: text("id").primaryKey(), pageVersionId: text("page_version_id").notNull(), blockKey: text("block_key").notNull(), blockType: text("block_type").notNull(), ordinal: integer("ordinal").notNull(), headingPath: text("heading_path").notNull(), contentMarkdown: text("content_markdown").notNull(), contentSha256: text("content_sha256").notNull()
+});
+export const wikiTemplates = sqliteTable("wiki_templates", {
+  id: text("id").primaryKey(), knowledgeBaseId: text("knowledge_base_id").notNull(), pageType: text("page_type").notNull(), currentVersionId: text("current_version_id"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const wikiTemplateVersions = sqliteTable("wiki_template_versions", {
+  id: text("id").primaryKey(), templateId: text("template_id").notNull(), definitionJson: text("definition_json").notNull(), createdAt: text("created_at").notNull()
+});
+export const wikiCitations = sqliteTable("wiki_citations", {
+  id: text("id").primaryKey(), pageVersionId: text("page_version_id").notNull(), blockKey: text("block_key"), resourceVersionId: text("resource_version_id").notNull(), locatorJson: text("locator_json").notNull(), status: text("status").notNull().default("active"), staleReason: text("stale_reason"), checkedAt: text("checked_at"), createdAt: text("created_at").notNull()
 });

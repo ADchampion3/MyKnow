@@ -26,6 +26,22 @@ The Sprint 2 PDF OCR contract, local setup, focused checks, and full-chain evide
 
 For large PDFs, `RESOURCE_PARSER_TIMEOUT_MS` controls the MarkItDown subprocess timeout (default 120 seconds).
 
+## Sprint 3 LLM Wiki
+
+The Wiki is the default knowledge-base projection while immutable resources, resource versions, chunks, FTS rows, and audit records remain the retrieval and provenance projection. A knowledge base uses `wiki-enabled` by default; an individual resource can be set to `retrieval-only` without removing it from search. Wiki page content is immutable by version, citations bind to a specific resource version and locator, and a restore creates a new page version.
+
+The Wiki API covers the overview/tree, page metadata, Markdown versions, deterministic blocks and diff, restore, templates, citations, locator previews, and impact items. The Worker queues `wiki:impact-scan` after a successfully indexed resource version; deterministic scans mark old-version citations `needs_review` and unreadable targets `broken`. The Web workspace exposes page slug/space/parent metadata, source locator previews, and resource task status/error traces.
+
+Sprint 3 uses the schema marker `sprint3-llm-wiki-v1`. An empty database starts with the normal API/Worker commands. An existing database must be rebuilt explicitly, preserving source storage and retained records:
+
+```powershell
+node scripts/recreate-db.js --confirm <path-to-existing-db>
+```
+
+The rebuild validates every referenced source blob before swapping only the exact database file, keeps a `.pre-sprint3-<timestamp>.bak` copy, and leaves the original database in place if validation or the build fails. Focused checks are `npm run check:wiki` (contract, layout, impact scan, and rebuild); `npm run check:all` includes them. Sprint 3 acceptance evidence is under [`artifacts/sprint3/`](artifacts/sprint3/), including the workspace screenshot and the source-read-only, version/diff, citation, layout, impact, and rebuild checks.
+
+Real LLM/Agent Wiki writes, RAG answer generation, multi-page review plans, and collaboration remain explicitly deferred to later Sprints.
+
 ## Source layout
 
 The runtime entry points stay stable, while implementation is grouped by responsibility:

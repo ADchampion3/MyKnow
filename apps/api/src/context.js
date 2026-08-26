@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { now, processingRequestFromVersion } from "@myknow/db";
+import { externalWikiMode, now, processingRequestFromVersion } from "@myknow/db";
 
 const omit = (row, fields) => {
   if (!row) return row;
@@ -28,7 +28,12 @@ export const createApiContext = ({ config, sqlite, db, http }) => {
     audit("queued", "task", value.id, requestId, { resourceVersionId, reason });
     return value;
   };
-  const resourceView = (row) => row ? omit(row, []) : row;
+  const resourceView = (row) => {
+    if (!row) return row;
+    const result = omit(row, []);
+    if (Object.hasOwn(row, "wiki_mode")) result.wikiMode = row.wiki_mode ? externalWikiMode(row.wiki_mode) : null;
+    return result;
+  };
   const versionView = (row) => {
     const result = omit(row, ["storage_key", "source_url", "fetched_at", "idempotency_key", "request_fingerprint"]);
     if (row?.ocr_mode) {

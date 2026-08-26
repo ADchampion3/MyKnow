@@ -5,8 +5,9 @@ import { handleKnowledgeBaseRoutes } from "./routes/knowledge-bases.js";
 import { handleResourceRoutes } from "./routes/resources.js";
 import { handleSearchRoutes } from "./routes/search.js";
 import { handleTaskRoutes } from "./routes/tasks.js";
+import { handleWikiRoutes } from "./routes/wiki.js";
 
-const routeHandlers = [handleKnowledgeBaseRoutes, handleResourceRoutes, handleSearchRoutes, handleTaskRoutes];
+const routeHandlers = [handleWikiRoutes, handleKnowledgeBaseRoutes, handleResourceRoutes, handleSearchRoutes, handleTaskRoutes];
 
 export const createRequestHandler = ({ config, sqlite, db }) => {
   const ctx = createApiContext({ config, sqlite, db, http: createHttpTools({ config }) });

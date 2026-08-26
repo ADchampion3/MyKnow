@@ -1,0 +1,6 @@
+Sprint 3 source immutability check
+Command: node scripts/wiki-contract.js
+
+Result: passed.
+
+The contract sends a source-content PATCH and DELETE request after import. Both are rejected with `RESOURCE_READ_ONLY`; the source resource, immutable resource version, content hash, storage object, and audit trail are not rewritten by those requests. Wiki pages can cite and open the source version, but cannot mutate it.

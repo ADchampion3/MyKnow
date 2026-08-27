@@ -158,12 +158,13 @@ Wiki 和 raw 首先分别完成关键词排序，彼此不共享 Top-K 配额。
 
 ### 4.1 Provider 和派生数据
 
-[`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js) 定义窄的 embedding provider 接口。当前内置 deterministic mock provider：
+[`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js) 定义窄的 embedding provider 接口。当前内置 deterministic mock provider 和 OpenAI-compatible HTTP provider：
 
 - 默认 provider：`mock`。
 - 默认 model：`mock-hash-v1`。
 - 默认维度：32；合法范围为 4–4096。
 - 使用 token 的 SHA-256 hash 生成并归一化向量，不需要 API key。
+- `openai-compatible`（也接受 `openai`）向配置的 `/embeddings` 端点发送 `{ model, input, dimensions }`，兼容本地 vLLM/OpenAI-compatible 服务；返回向量必须是 4–4096 个有限数字。Provider 记录实际返回维度，检索只合并相同维度的派生向量；某些服务会忽略请求中的 `dimensions`，不会被客户端静默截断。
 - 使用 cosine similarity 排序。
 
 `retrieval_embeddings` 是可重建的派生表，支持两类 owner：
@@ -204,10 +205,18 @@ RRF = 1 / (60 + keyword rank) + 1 / (60 + vector rank)
 
 ```text
 RETRIEVAL_VECTOR_ENABLED=true|false
-EMBEDDING_PROVIDER=mock|timeout|failed|...
+EMBEDDING_PROVIDER=mock|openai-compatible|timeout|failed|...
 EMBEDDING_MODEL=mock-hash-v1
 EMBEDDING_DIMENSIONS=32
 EMBEDDING_FAILURE_MODE=timeout|failed
+EMBEDDING_API_BASE_URL=http://localhost:9000/v1/embeddings
+EMBEDDING_API_KEY=
+```
+
+`EMBEDDING_API_BASE_URL` 可以填写完整的 `/embeddings` URL，也可以填写 API base URL（例如 `http://localhost:9000/v1`），Provider 会补上 `/embeddings`。真实模型检查会请求 `qwen3-embedding-8b` 和 1024 维；如果服务忽略该参数，检查会同时报告实际返回维度，不改变常规 mock 检查：
+
+```powershell
+npm run check:retrieval-real
 ```
 
 当前向量实现是 SQLite 有上限扫描，适合本地单用户 MVP。`retrieval.js` 中的 `ponytail:` 注释记录了规模超过本地上限后引入带身份索引或 ANN 存储的升级路径。
@@ -380,6 +389,8 @@ npm run check:retrieval-contract   # API、范围、CJK、replay、locator、校
 npm run check:retrieval-graph      # seed gate、双向 graph、hop 和边界
 npm run check:retrieval-budget     # 60/40 budget、截断和 provenance
 npm run check:retrieval-vector     # provider、降级、Worker embedding 和去重
+npm run check:embedding-provider  # OpenAI-compatible HTTP 请求合同
+npm run check:retrieval-real      # 本地真实 OpenAI-compatible embedding 模型端到端检查
 npm run check:retrieval-performance # 合成规模下的召回和核心耗时
 npm run check:retrieval
 npm run check:all

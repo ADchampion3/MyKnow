@@ -44,6 +44,7 @@ export function loadConfig(env = process.env) {
     embeddingModel: env.EMBEDDING_MODEL || "mock-hash-v1",
     embeddingDimensions: boundedInt("EMBEDDING_DIMENSIONS", env.EMBEDDING_DIMENSIONS, 32, 4, 4096),
     embeddingFailureMode: env.EMBEDDING_FAILURE_MODE || "",
+    embeddingApiBaseUrl: env.EMBEDDING_API_BASE_URL || "",
     embeddingApiKey: env.EMBEDDING_API_KEY || ""
   };
 }

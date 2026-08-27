@@ -187,8 +187,8 @@ const rawKeywordSearch = (sqlite, knowledgeBaseId, tokens) => {
 };
 
 const vectorRowsForWiki = (sqlite, knowledgeBaseId, spaceId, provider) => {
-  const clauses = ["e.owner_type='wiki_page'", "e.status='ready'", "e.provider=?", "e.model=?", "p.knowledge_base_id=?", "p.status='active'", "p.page_type NOT IN ('index','log')", "p.current_version_id=v.id", "e.page_version_id=v.id"];
-  const args = [provider.provider, provider.model, knowledgeBaseId];
+  const clauses = ["e.owner_type='wiki_page'", "e.status='ready'", "e.provider=?", "e.model=?", "e.dimensions=?", "p.knowledge_base_id=?", "p.status='active'", "p.page_type NOT IN ('index','log')", "p.current_version_id=v.id", "e.page_version_id=v.id"];
+  const args = [provider.provider, provider.model, provider.dimensions, knowledgeBaseId];
   if (spaceId) { clauses.push("p.space_id=?"); args.push(spaceId); }
   return sqlite.prepare(`SELECT e.vector_json,e.page_version_id,p.id AS page_id,p.slug,p.space_id,p.page_type,p.status AS page_status,p.title AS page_title,v.content_markdown FROM retrieval_embeddings e JOIN wiki_pages p ON p.id=e.owner_id JOIN wiki_page_versions v ON v.id=e.page_version_id WHERE ${clauses.join(" AND ")}`).all(...args);
 };
@@ -204,10 +204,10 @@ const vectorRowsForRaw = (sqlite, knowledgeBaseId, provider) => sqlite.prepare(`
   JOIN resource_knowledge_bases rkb ON rkb.resource_id=r.id
   JOIN processing_runs pr ON pr.id=c.processing_run_id
   WHERE e.owner_type='raw_chunk' AND e.status='ready' AND e.provider=? AND e.model=?
-    AND rkb.knowledge_base_id=? AND r.status<>'archived' AND r.current_version_id=rv.id
+    AND rkb.knowledge_base_id=? AND e.dimensions=? AND r.status<>'archived' AND r.current_version_id=rv.id
     AND rv.status='indexed' AND rv.active_processing_run_id=c.processing_run_id AND pr.status='indexed'
     AND c.chunk_type='text' AND c.status='active'
-`).all(provider.provider, provider.model, knowledgeBaseId);
+`).all(provider.provider, provider.model, knowledgeBaseId, provider.dimensions);
 
 const vectorSearch = (rows, builder, queryVector) => rows.map((row) => {
   const vector = jsonParse(row.vector_json, null);
@@ -473,8 +473,11 @@ export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => 
         trace.vector.provider = provider.provider;
         trace.vector.model = provider.model;
         trace.vector.dimensions = provider.dimensions;
-        wikiVector = vectorSearch(vectorRowsForWiki(sqlite, request.knowledgeBaseId, request.spaceId, provider), (row, score) => pageResult(sqlite, row, tokens, score), queryEmbedding.vector);
-        rawVector = vectorSearch(vectorRowsForRaw(sqlite, request.knowledgeBaseId, provider), (row, score) => rawResult(sqlite, row, tokens, score), queryEmbedding.vector);
+        trace.vector.requestedDimensions = queryEmbedding.requestedDimensions ?? provider.dimensions;
+        const vectorProvider = { ...provider, dimensions: queryEmbedding.dimensions };
+        trace.vector.dimensions = queryEmbedding.dimensions;
+        wikiVector = vectorSearch(vectorRowsForWiki(sqlite, request.knowledgeBaseId, request.spaceId, vectorProvider), (row, score) => pageResult(sqlite, row, tokens, score), queryEmbedding.vector);
+        rawVector = vectorSearch(vectorRowsForRaw(sqlite, request.knowledgeBaseId, vectorProvider), (row, score) => rawResult(sqlite, row, tokens, score), queryEmbedding.vector);
         trace.vector.status = wikiVector.length || rawVector.length ? "used" : "no_embeddings";
         trace.vector.keywordFallback = false;
       } catch (caught) {

@@ -12,6 +12,7 @@ Sprint 4 page-centric RAG retrieval is implemented and passes the empty-database
 | Keyword baseline | `retrieval-api-contract.log` | Pass: English token/stopword handling, CJK bigrams, OR query, title/phrase scoring, and explainable match features |
 | Wiki seed gate and graph expansion | `graph-expansion.log` | Pass: score/margin gate, same-KB bidirectional graph, two hops, per-layer cap, decay, low-confidence and raw-only no-graph cases |
 | Optional vector retrieval and degrade path | `retrieval-vector.log` | Pass: mock provider, persisted Wiki/raw embeddings, RRF merge, disabled path, timeout degrade, failed embedding audit path, no secret leakage |
+| Real embedding provider follow-up | `retrieval-real-embedding.log` | Pass: OpenAI-compatible request, real Worker Wiki/raw vectors, real query vector, and vector retrieval with `qwen3-embedding-8b`; service returned 4096 dimensions while 1024 was requested and the actual dimension was recorded |
 | Provenance and context assembly | `context-budget.log` | Pass: 60/40 independent budgets, Wiki block/adjacent selection, raw parent context, strict estimate, truncation marker, locator/provenance metadata |
 | Trace replay | `retrieval-api-contract.log`, `retrieval-trace.jsonl` | Pass: `POST /api/retrieval/query` persists and `GET /api/retrieval/runs/:id` replays the same trace without raw result text; generated context snapshot remains available |
 | Three-column Web checker | `retrieval-layout.png` | Pass: Sprint 4 retrieval checker renders independent Wiki/raw/graph cards and right-rail trace status |
@@ -34,6 +35,8 @@ The parallel Standards and Spec review used Sprint 3 commit `94c2c49` as the fix
 npm run check:all
 npm --workspace apps/web run build
 npm run check:retrieval
+npm run check:embedding-provider
+npm run check:retrieval-real
 npm run check:wiki-rebuild
 node --check packages/db/src/retrieval.js
 node --check packages/db/src/embeddings.js
@@ -49,4 +52,4 @@ All commands passed. The existing OCR check's expected fixture-failure line is i
 
 ## Deferred by design
 
-Answer generation, completion/chat models, Agent runtime, automatic Wiki writes/link enrichment, resource-space filtering for raw retrieval, and ANN storage remain deferred to the next Sprint backlog. The vector seam currently provides a deterministic local mock and explicit provider-degrade states.
+Answer generation, completion/chat models, Agent runtime, automatic Wiki writes/link enrichment, resource-space filtering for raw retrieval, and ANN storage remain deferred to the next Sprint backlog. The vector seam provides a deterministic local mock, an OpenAI-compatible HTTP provider, and explicit provider-degrade states.

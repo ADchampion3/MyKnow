@@ -29,8 +29,10 @@
     "check:retrieval-graph": "node scripts/retrieval-graph-check.js",
     "check:retrieval-budget": "node scripts/retrieval-budget-check.js",
     "check:retrieval-vector": "node scripts/retrieval-vector-check.js",
+    "check:embedding-provider": "node scripts/embedding-provider-check.js",
+    "check:retrieval-real": "node scripts/retrieval-real-embedding-check.js",
     "check:retrieval-performance": "node scripts/retrieval-performance-check.js",
-    "check:retrieval": "npm run check:retrieval-contract && npm run check:retrieval-graph && npm run check:retrieval-budget && npm run check:retrieval-vector && npm run check:retrieval-performance",
+    "check:retrieval": "npm run check:retrieval-contract && npm run check:retrieval-graph && npm run check:retrieval-budget && npm run check:retrieval-vector && npm run check:embedding-provider && npm run check:retrieval-performance",
     "db:recreate": "node scripts/recreate-db.js",
     "trace:chunks": "node scripts/chunk-trace.js",
     "test": "npm run test --workspaces --if-present"

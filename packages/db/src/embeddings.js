@@ -28,6 +28,23 @@ const mockVector = (value, dimensions) => {
   return normalize(vector);
 };
 
+const HTTP_PROVIDER_NAMES = new Set(["openai", "openai-compatible"]);
+const embeddingEndpoint = (baseUrl) => {
+  let url;
+  try { url = new URL(String(baseUrl || "").trim()); }
+  catch { throw fail("embedding API base URL is invalid", "EMBEDDING_PROVIDER_UNAVAILABLE"); }
+  if (!["http:", "https:"].includes(url.protocol)) throw fail("embedding API base URL must use HTTP or HTTPS", "EMBEDDING_PROVIDER_UNAVAILABLE");
+  const pathname = url.pathname.replace(/\/+$/u, "");
+  if (!pathname.endsWith("/embeddings")) url.pathname = `${pathname}/embeddings`;
+  return url;
+};
+
+const responseVector = (payload) => {
+  const vector = payload?.data?.[0]?.embedding;
+  if (!Array.isArray(vector) || vector.length < 4 || vector.length > 4096 || vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw fail("embedding provider returned an invalid vector", "EMBEDDING_RESPONSE_INVALID");
+  return vector;
+};
+
 export const cosineSimilarity = (left, right) => {
   if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length || !left.length) return null;
   let dot = 0;
@@ -64,10 +81,30 @@ export const createEmbeddingProvider = (config = {}) => {
       if (!enabled || providerName === "none" || providerName === "disabled") unavailable("embedding retrieval is disabled", "EMBEDDING_DISABLED");
       if (providerName === "timeout" || config.embeddingFailureMode === "timeout") unavailable("embedding provider timed out", "EMBEDDING_TIMEOUT");
       if (providerName === "failed" || providerName === "mock-failure" || config.embeddingFailureMode === "failed") unavailable("embedding provider failed", "EMBEDDING_FAILED");
-      if (providerName !== "mock" && providerName !== "mock-hash") unavailable(`embedding provider '${providerName}' is not configured`, "EMBEDDING_PROVIDER_UNAVAILABLE");
       const started = Date.now();
-      const vector = mockVector(text, dimensions);
-      return { ...info, vector, durationMs: Date.now() - started };
+      if (providerName === "mock" || providerName === "mock-hash") {
+        const vector = mockVector(text, dimensions);
+        return { ...info, vector, durationMs: Date.now() - started };
+      }
+      if (!HTTP_PROVIDER_NAMES.has(providerName)) unavailable(`embedding provider '${providerName}' is not configured`, "EMBEDDING_PROVIDER_UNAVAILABLE");
+      if (typeof text !== "string" || !text.trim()) throw fail("embedding text must be a non-empty string", "VALIDATION_ERROR");
+      const endpoint = embeddingEndpoint(config.embeddingApiBaseUrl);
+      const headers = { "content-type": "application/json" };
+      const apiKey = String(config.embeddingApiKey || "").trim();
+      if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+      let response;
+      try {
+        response = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify({ model, input: text, dimensions }), signal });
+      } catch (caught) {
+        if (caught?.name === "AbortError") throw fail(signal?.aborted ? "embedding request was cancelled" : "embedding provider timed out", signal?.aborted ? "TASK_CANCELLED" : "EMBEDDING_TIMEOUT");
+        throw fail("embedding provider request failed", "EMBEDDING_FAILED");
+      }
+      if (!response.ok) throw fail(`embedding provider returned HTTP ${response.status}`, response.status >= 500 ? "EMBEDDING_FAILED" : "EMBEDDING_PROVIDER_UNAVAILABLE");
+      let payload;
+      try { payload = await response.json(); }
+      catch { throw fail("embedding provider returned invalid JSON", "EMBEDDING_RESPONSE_INVALID"); }
+      const vector = responseVector(payload);
+      return { ...info, dimensions: vector.length, requestedDimensions: dimensions, vector, durationMs: Date.now() - started };
     }
   };
 };

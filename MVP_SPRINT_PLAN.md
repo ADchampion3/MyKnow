@@ -2,9 +2,10 @@
 
 ## 1. 计划基线
 
-- **目标**：交付一个本地优先、单用户可用的闭环：导入资料 → 解析/索引 → 选择范围问答 → Agent 提议 Wiki 变更 → 人工审核后写入。
+- **目标**：交付一个本地优先、单用户可用的完整闭环：导入资料 → 解析/索引 → 选择范围问答 → Agent 提议 Wiki 变更 → 人工审核后写入。当前已完成 Sprint 3 的 Wiki 双投影基础，Sprint 4-6 仍是后续规划。
 - **周期**：6 个 Sprint，每个 Sprint 2 周，共 12 周；每个 Sprint 最后半天进行演示、验收和回归。
-- **首版支持**：Markdown、TXT、native/OCR PDF、URL 快照；OpenAI-compatible 云端 Provider；Ollama 接口保留但不作为发布阻塞项。
+- **当前可运行输入**：Markdown、TXT、native/OCR PDF；URL 抓取和 Base64 导入不属于当前 contract。当前 Worker 使用本地确定性处理和 mock Provider。
+- **后续规划能力**：URL 快照、OpenAI-compatible/Ollama Provider、RAG 问答和真实 LLM/Agent 整理仍按后续 Sprint 交付，不作为 Sprint 3 已实现能力。
 - **明确不做**：多用户协作、实时编辑、原生客户端、自动网页同步、手写 OCR、知识图谱、多 Agent、自训练模型。
 - **验收证据**：每项验收都必须留下可复现的测试记录、截图或日志；“通过”以验收人实际操作结果为准，不以代码完成为准。
 
@@ -12,10 +13,11 @@
 
 ### 2.1 角色与状态
 
-- **原始资料层**：导入文件或网页快照，只增不改；更新生成新版本并保留内容指纹、来源和时间。
+- **原始资料层**：导入文件（URL 网页快照属于后续规划），只增不改；更新生成新版本并保留内容指纹、来源和时间。
 - **派生知识层**：Wiki、摘要、标签、链接和冲突结果，均保存来源引用、操作者、时间、版本和 diff。
 - **任务状态**：`queued`、`running`、`succeeded`、`failed`、`retrying`；前端能看到进度、最近错误和重试入口。
-- **审核状态**：`proposed`、`approved`、`rejected`、`rolled_back`。
+- **Wiki 引用状态**：`active`、`needs_review`、`broken`；资料新版本成功索引后扫描相关引用，无法读取目标或 locator 时标记为 `broken`。
+- **Agent 审核状态**：`proposed`、`approved`、`rejected`、`rolled_back`；这是 Sprint 5 的规划能力，不是当前 Sprint 3 的写入流程。
 
 ### 2.2 每个 Sprint 的通用完成条件
 
@@ -29,15 +31,15 @@
 
 **交付范围**
 
-- Next.js/React/TypeScript 前端、NestJS API、后台 worker、Drizzle + SQLite 初始化。
-- 资料、资料版本、知识库/空间、标签、chunk、引用、Wiki 页面/版本、任务、审核计划等核心表及迁移。
+- Next.js/React 前端、NestJS API、后台 worker、Drizzle + SQLite 初始化。
+- 知识库、空间、标签、任务和审计等 Sprint 1 基础表及约束；资料版本、chunk、Wiki 页面和审核计划在后续 Sprint 增量交付。
 - 本地文件存储适配器、Provider 接口（嵌入/问答/Agent 分离）、配置校验和密钥不入前端机制。
 - 三栏信息架构：左侧知识库树，中间内容区，右侧任务/Agent 区；基础导航和错误边界。
 
 **验收标准**
 
 1. 在全新机器执行 README 中的启动步骤，API、Web、worker 均能启动，健康检查返回 200。
-2. 新建知识库、子空间和标签后，刷新页面数据仍存在；数据库迁移可重复执行且无破坏性重建。
+2. 新建知识库、子空间和标签后，刷新页面数据仍存在；空数据库可以按文档启动。
 3. 通过浏览器开发者工具和接口响应确认 API 密钥不会出现在 HTML、前端 bundle 或业务表中。
 4. 创建一条任务并让 worker 完成/失败各一次；UI 显示状态、进度、错误信息和重试按钮。
 5. 主流程页面在 1280px 桌面宽度下三栏不重叠，核心导航可在 1024px 宽度下使用。
@@ -46,66 +48,82 @@
 
 ### Sprint 2（第 3-4 周）：资料导入、版本与索引流水线
 
-**目标**：可靠接收四类资料，形成不可变原始版本，并完成可检索的全文/向量索引。
+**目标**：可靠接收 Markdown、TXT 和 PDF，形成不可变原始版本，并完成可检索的 FTS5 全文索引。向量索引、URL 抓取和 Base64 导入不属于当前 contract。
 
 **交付范围**
 
-- Markdown/TXT/PDF 上传；PDF 支持显式选择 OCR `auto/off/force` 与 `local/cloud/paddleocr` Provider；URL 抓取正文快照、标题、原始 URL、抓取时间仍受 raw-source 合同约束。
+- Markdown/TXT/PDF 上传；PDF 支持显式选择 OCR `auto/off/force` 与 `local/cloud/paddleocr` Provider。URL 抓取和 Base64 导入暂不支持。
 - MIME/大小校验、内容指纹去重、版本关系、失败重试和错误日志。
-- 原生/OCR 解析、页面/区块结构提取、分块、全文索引和本地向量索引；chunk 关联资料版本、页码范围和定位信息。
-- 资料归属多个知识库（引用关系，不复制文件）；标签、敏感度策略和导入任务进度页。
+- 原生/OCR 解析、页面/区块结构提取、分块和 SQLite FTS5 全文索引；chunk 关联资料版本、页码范围和定位信息。
+- 资料归属多个知识库（引用关系，不复制文件）；标签、导入任务状态和错误信息可查询。
 
 **验收标准**
 
-1. 各导入类型各准备 3 份样本（含中文、空内容、格式错误）；成功样本在 2 分钟内进入 `indexed`，错误样本进入 `failed` 并给出可读原因。
+1. Markdown、TXT、PDF 各准备 3 份样本（含中文、空内容、格式错误）；成功样本在 2 分钟内进入 `indexed`，错误样本进入 `failed` 并给出可读原因。
 2. 同一文件重复导入不产生重复原始版本；内容变化后产生新版本，旧版本仍可下载/查看且指纹不同。
 3. 一份资料同时加入两个知识库，文件存储只有一份，两个归属关系均可查询和移除。
-4. 任一索引 chunk 能反查到资料、版本、PDF 页码/段落或 URL 定位；删除/重建向量索引不会删除主数据库记录。
+4. 任一索引 chunk 能反查到资料、版本和 PDF 页码/段落定位；删除/重建派生索引不会删除主数据库记录。
 5. 任务中断后点击重试可从最近安全步骤继续，最终状态和错误日志可审计。
 
 **出口证据**：导入验收表、OCR 页面/区块与 Provider 选择、版本链查询结果、chunk 定位抽样（至少 20 个）、任务失败/重试/回滚日志。
 
 ### Sprint 3（第 5-6 周）：知识库浏览、Wiki 派生层与版本控制
 
-**目标**：让用户能浏览资料和 Wiki，并以可回溯方式维护派生内容。
+**状态**：已实现；focused checks、Web build 和 Sprint 3 证据已通过。
+
+**目标**：让用户能浏览原始检索投影和 Wiki 派生投影，并以可回溯方式维护 Wiki 内容。
 
 **交付范围**
 
-- 知识库/子空间树、资料列表与详情、来源/版本/标签/敏感度展示。
-- Markdown Wiki 页面、主题树/目录、默认模板（定义、核心观点、证据、争议、相关资料、待验证问题）。
-- 自定义模板配置；页面/章节/段落/事实条目版本、diff、单次变更恢复。
-- 引用组件：显示文档、版本和原文位置；原始资料只读。
+- Wiki 默认入口 `index/overview` 和追加式 `log` 系统页；普通页面类型为 `concept`、`entity`、`source-summary`、`synthesis`。
+- 页面树、slug、空间和父页面关系；页面元数据可单独修改，页面不能形成父子循环。
+- 按页面类型配置默认/自定义模板。模板是 Markdown 初始骨架，包含有序章节、必需性和说明；新页面记录模板版本，不是所有页面统一使用六章节。
+- 页面正文以不可变 Markdown 版本保存；从 Markdown 派生稳定 Block，支持版本列表、确定性 diff 和 restore 生成新版本。
+- 引用绑定具体 `resourceVersionId` 和 locator，支持来源完整性校验、只读原文下载和文本 locator 预览；原始资料不能修改或删除。
+- 知识库默认 Wiki 整理策略；资源可覆盖为 `retrieval-only`，仍可检索但不进入 Wiki 候选。
+- 资源版本成功索引后由 Worker 执行确定性影响扫描，生成 `needs_review` 或 `broken` 引用状态及审计记录。
+- Web 三栏工作区展示页面树、Markdown 编辑/预览、版本/diff、来源引用、任务状态和影响项，并提供 1280px/1024px/700px 响应式布局。
 
 **验收标准**
 
-1. 从知识库树进入任一资料和 Wiki 页面，能看到来源、版本、标签及最近更新时间；刷新或重新登录后内容一致。
-2. 用默认模板新建页面，六个章节均存在；修改模板后新页面使用新模板，历史页面不被静默改写。
+1. 从空数据库启动并创建知识库后，默认进入 Wiki `index/overview`；页面树、模板、空间、任务和影响项可查询。
+2. 使用四种页面类型创建页面时，初始 Markdown 使用对应模板；模板更新后只影响新页面，历史页面版本保留原模板快照。
 3. 对同一页面完成两次编辑，diff 明确标出新增/删除；恢复一次旧版本后生成新版本，历史版本仍保留。
-4. 尝试修改或删除原始资料时，UI 和 API 均拒绝，且不改变文件、版本和指纹。
-5. 每个 Wiki 引用至少能打开对应资料版本和定位；失效引用在页面上标红并进入待处理列表。
+4. 引用始终绑定具体资料版本；有效文本 locator 能预览规范化原文，越界 locator、错误页码和损坏来源被拒绝或标记为 `broken`。
+5. 尝试修改或删除原始资料时，UI 和 API 均拒绝，且不改变文件、版本和指纹。
+6. `retrieval-only` 资源仍可检索和查看，但不进入 Wiki 整理候选。
+7. 资料新版本成功索引后，旧版本引用进入 `needs_review`；Worker 任务、索引状态和审计记录保持一致。
+8. 1280px 三栏、1024px 核心导航和 700px 堆叠布局均可使用。
 
-**出口证据**：模板/版本/diff 演示录像或截图、原始层不可变 API 测试、引用抽样报告。
+**出口证据**：`artifacts/sprint3/acceptance-report.md`、`wiki-api-contract.log`、`wiki-version-diff.md`、`wiki-citation-evidence.md`、`wiki-impact-scan.log`、`wiki-layout.log`、`wiki-workspace.png` 及对应 focused checks。
 
-### Sprint 4（第 7-8 周）：范围可控的 RAG 问答
+### Sprint 4（第 7-8 周）：Page-centric RAG 资料召回与检索
 
-**目标**：交付严格库内与开放问答，保证检索范围透明且结论可引用。
+**目标**：先交付不依赖 Agent 和答案生成的 RAG 资料召回、Wiki 图扩展、provenance 查询与 context assembly。
 
 **交付范围**
 
-- 对话页支持勾选知识库/空间，发送前展示实际范围和资料数量。
-- 关键词 + 向量混合检索、简单重排序、chunk 去重；记录检索 chunk、排序和模型调用日志。
-- 严格库内模式证据不足时回答“不知道”；开放模式分区显示库内证据与外部知识。
-- 引用渲染到文档、版本和位置；Provider 超时、限流、无 key 有明确错误状态。
+- Wiki 与 raw 使用独立检索通道和独立 Top-K；Wiki 以页面为主单位，raw 以 child chunk 为主单位。
+- 关键词检索支持英文 token/stopwords、中文 CJK bigram、标题/短语加分；向量检索作为可选增强路径。
+- 只有高置信 Wiki seed 才能触发同一知识库内显式 Wiki 链接的双向 2-hop graph expansion；raw 永远不能作为 graph seed。
+- Wiki → raw 只做 provenance lookup，不把 provenance 当作普通 graph edge，也不自动扩散 raw 内容。
+- 以独立预算组装 Wiki 页面和 raw context，记录 query、候选、排序、图扩展、provenance、预算、耗时和失败原因。
+- 提供 `POST /api/retrieval/query`、`GET /api/retrieval/runs/:id` 和三栏检索检查器；本 Sprint 不生成答案。
 
 **验收标准**
 
-1. 选择两个知识库提问，检索日志只包含所选范围；取消一个后再次提问，结果不再包含其 chunk。
-2. 用包含明确答案的 10 个问题测试，至少 8 个关键结论引用正确文档、版本和定位；引用可点击回原文。
-3. 用 5 个无答案问题测试，严格库内模式 5/5 明确声明未知且不生成伪造引用。
-4. 开放问答中，库内证据和外部补充有视觉/文本区分；关闭外部 Provider 时严格模式仍可用。
-5. 记录每次检索的 query、候选 chunk、重排序结果、耗时、token 和失败原因；单份普通资料从导入完成到可问答不超过 2 分钟。
+1. Wiki 和 raw 各自返回独立 Top-K，不互相挤占配额；当前版本和知识库范围过滤正确。
+2. 只有高置信 Wiki seed 才能扩展最多 2-hop 的同库 Wiki 图；raw 命中永远不触发图遍历。
+3. provenance lookup 不改变 graph 结果；结果可反查 Wiki 页面、资料、资料版本和 locator。
+4. 关键词路径支持英文 token、stopwords、中文 CJK bigram、标题加分和 OR 召回；向量关闭或失败时仍可检索。
+5. context 的 Wiki/raw 独立预算生效；超预算有 `truncated` 标记，无静默截断。
+6. 20 条带标注查询的目标结果 Recall@10 ≥90%，范围泄漏为 0，低置信不扩图和 raw 不扩图反例全部通过。
+7. 100 份资料、约 5,000 个 chunk 的本地关键词 + 图扩展 + context assembly P95 ≤2 秒；向量 Provider 耗时单独记录。
+8. 每次检索都能通过 trace 回放 query、候选、排序、图扩展、provenance、context、耗时和失败原因。
 
-**出口证据**：15 题引用与未知集结果、范围隔离测试、检索/模型日志样例、端到端耗时报告。
+**出口证据**：`artifacts/sprint4/acceptance-report.md`、`retrieval-api-contract.log`、`retrieval-trace.jsonl`、`graph-expansion.log`、`context-budget.log`、`retrieval-vector.log`、`migration-rebuild.log`、`retrieval-layout.png` 及对应 focused checks。
+
+**明确延期**：开放问答、严格库内问答、completion/chat model 答案生成、Agent runtime、查询改写、自动 wikilink enrichment、Agent 驱动的多资料 Wiki 综合和 raw resource-space 关联。原 MVP 问答门槛保留为后续验收要求，不通过降低阈值完成 Sprint 4。
 
 ### Sprint 5（第 9-10 周）：Agent 整理、变更计划与审核回滚
 
@@ -153,11 +171,13 @@
 
 只有以下条件全部满足，MVP 才可标记为“可用”并发布：
 
+> 本节是六个 Sprint 的最终发布门槛，不代表当前 Sprint 3 已全部实现。当前已交付能力以 Sprint 3 小节和 `artifacts/sprint3/acceptance-report.md` 为准；未完成项继续由 Sprint 4-6 交付。
+
 ### 4.1 功能闭环
 
-- [ ] Markdown、TXT、PDF（含显式 OCR 模式/Provider）、URL 均可导入；原始资料不可变，更新保留版本关系和内容指纹。
+- [ ] Markdown、TXT、PDF（含显式 OCR 模式/Provider）可导入；URL 快照只有在重新纳入输入 contract 后再验收；原始资料不可变，更新保留版本关系和内容指纹。
 - [ ] 资料可加入多个知识库/空间；标签、来源、时间、敏感度和任务状态可查看、修改和审计。
-- [ ] 解析、分块、全文/向量索引完成后可检索；chunk 可反查来源和位置。
+- [ ] 解析、分块、FTS5 全文索引（以及 Sprint 4 规划的向量索引）完成后可检索；chunk 可反查来源和位置。
 - [ ] 对话发送前展示实际检索范围；严格库内/开放问答均可用，证据不足时明确未知。
 - [ ] Agent 只生成可审核变更计划；用户可逐项/批量接受、拒绝，Wiki 支持版本、diff 和回滚。
 - [ ] 重复、冲突、更新影响能被标记；禁止删除或覆盖原始资料。

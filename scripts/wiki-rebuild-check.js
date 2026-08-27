@@ -33,7 +33,7 @@ try {
   initial.sqlite.close();
 
   const rebuilt = rebuildDatabase({ target: databaseFile, resourceStorageDir: storage });
-  assert.equal(rebuilt.schemaVersion, "sprint3-llm-wiki-v1");
+  assert.equal(rebuilt.schemaVersion, "sprint4-rag-retrieval-v1");
   assert.equal(rebuilt.rawStoragePreserved, true);
   assert.equal(rebuilt.storage.checked, 1);
   assert.equal(rebuilt.before.resources, rebuilt.after.resources);
@@ -41,6 +41,9 @@ try {
   assert.equal(rebuilt.before.auditLogs, rebuilt.after.auditLogs);
   const restored = createDatabase(`file:${databaseFile}`);
   assert.equal(restored.sqlite.prepare("SELECT id FROM resources WHERE id=? AND current_version_id=? AND wiki_mode='retrieval_only'").get(ids.resource, ids.version).id, ids.resource);
+  assert.equal(restored.sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get().value, "sprint4-rag-retrieval-v1");
+  assert.equal(restored.sqlite.prepare("SELECT value FROM schema_meta WHERE key='derived_schema'").get().value, "sprint4-derived-ready");
+  for (const table of ["wiki_fts", "wiki_link_edges", "retrieval_embeddings", "retrieval_runs"]) assert.ok(restored.sqlite.prepare("SELECT name FROM sqlite_master WHERE name=?").get(table), `missing rebuilt derived table ${table}`);
   assert.equal(restored.sqlite.prepare("SELECT active_processing_run_id FROM resource_versions WHERE id=?").get(ids.version).active_processing_run_id, ids.run);
   assert.equal(restored.sqlite.prepare("SELECT metadata FROM audit_logs WHERE id=?").get(ids.audit).metadata, JSON.stringify({ preserved: true }));
   restored.sqlite.close();

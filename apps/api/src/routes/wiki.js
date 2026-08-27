@@ -12,7 +12,9 @@ import {
   normalizeTemplateDefinition,
   parseJsonObject,
   parseMarkdownBlocks,
+  queueEmbeddingTask,
   readBytes,
+  updateWikiSearchProjection,
   sha256,
   slugFromTitle,
   templateMarkdown,
@@ -26,6 +28,13 @@ const parseStored = (value, fallback) => {
   try { return value ? JSON.parse(value) : fallback; } catch { return fallback; }
 };
 const isoNow = (ctx) => ctx.now();
+
+const queuePageEmbedding = (ctx, pageId, pageVersionId, requestId, reason) => {
+  if (ctx.config.retrievalVectorEnabled === false) return null;
+  const task = queueEmbeddingTask(ctx.sqlite, { ownerType: "wiki_page", ownerId: pageId, pageVersionId, reason });
+  if (task?.id) ctx.audit("queued", "task", task.id, requestId, { type: "retrieval:embed", ownerType: "wiki_page", ownerId: pageId, pageVersionId });
+  return task;
+};
 
 const ensureTemplates = (sqlite, knowledgeBaseId) => sqlite.transaction(() => {
   const timestamp = new Date().toISOString();
@@ -226,6 +235,8 @@ const insertPageVersion = (ctx, page, { contentMarkdown, baseVersionId, changeSu
     if (citations === undefined) copyCitations(ctx.sqlite, current?.id, versionId, timestamp);
     else insertCitations(ctx.sqlite, page.knowledge_base_id, versionId, citations, blocks, timestamp, ctx.config.resourceStorageDir);
     ctx.sqlite.prepare("UPDATE wiki_pages SET current_version_id=?,updated_at=? WHERE id=?").run(versionId, timestamp, page.id);
+    updateWikiSearchProjection(ctx.sqlite, page.id);
+    queuePageEmbedding(ctx, page.id, versionId, requestId, restoreOfVersionId ? "wiki-page-restored" : "wiki-page-version-created");
     ctx.audit(restoreOfVersionId ? "restored" : "version_created", "wiki_page_version", versionId, requestId, { pageId: page.id, restoreOfVersionId, blockCount: blocks.length });
     result = ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=?").get(versionId);
   })();
@@ -375,6 +386,8 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
         const page = { id, knowledge_base_id: knowledgeBaseId };
         if (Array.isArray(body?.citations)) insertCitations(ctx.sqlite, knowledgeBaseId, versionId, body.citations, blocks, timestamp, ctx.config.resourceStorageDir);
         ctx.sqlite.prepare("UPDATE wiki_pages SET current_version_id=? WHERE id=?").run(versionId, id);
+        updateWikiSearchProjection(ctx.sqlite, id);
+        queuePageEmbedding(ctx, id, versionId, requestId, "wiki-page-created");
         ctx.audit("created", "wiki_page", id, requestId, { pageType, templateVersionId: template.current_version_id });
         page.current_version_id = versionId;
       })();
@@ -448,6 +461,8 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
     catch (caught) { ctx.json(res, caught.code === "WIKI_PAGE_CYCLE" ? 409 : 404, null, ctx.error(caught.code, caught.message), requestId); return true; }
     ctx.sqlite.transaction(() => {
       ctx.sqlite.prepare("UPDATE wiki_pages SET title=?,slug=?,space_id=?,parent_page_id=?,updated_at=? WHERE id=?").run(title, slug, spaceId, parentPageId, isoNow(ctx), page.id);
+      updateWikiSearchProjection(ctx.sqlite, page.id);
+      queuePageEmbedding(ctx, page.id, page.current_version_id, requestId, "wiki-page-metadata-updated");
       ctx.audit("updated", "wiki_page", page.id, requestId, { metadataOnly: true });
     })();
     ctx.json(res, 200, pageDetail(ctx.sqlite, pageFor(ctx.sqlite, page.id)), null, requestId);

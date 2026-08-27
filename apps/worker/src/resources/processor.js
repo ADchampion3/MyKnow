@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { chunkDocument, normalizeChunkingConfig, now, persistBytes, processingRequestFromVersion, refreshResourceStatus, sha256 } from "@myknow/db";
+import { chunkDocument, createEmbeddingTaskCache, normalizeChunkingConfig, now, persistBytes, processingRequestFromVersion, queueEmbeddingTask, refreshResourceStatus, searchableText, sha256 } from "@myknow/db";
 
 const archivedError = () => Object.assign(new Error("resource is archived"), { code: "RESOURCE_ARCHIVED" });
 
@@ -75,6 +75,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
     const parentIds = new Map();
     const insertChunk = sqlite.prepare("INSERT INTO chunks (id,resource_version_id,processing_run_id,parent_chunk_id,chunk_type,sequence,content,context_header,start_offset,end_offset,locator,strategy,forced_split,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?,'active',?)");
     const insertFts = sqlite.prepare("INSERT INTO resource_fts (chunk_id,content,title) VALUES (?,?,?)");
+    const activeTaskCache = config.retrievalVectorEnabled !== false ? createEmbeddingTaskCache(sqlite) : null;
     for (const chunk of document.output) {
       const id = crypto.randomUUID();
       if (chunk.chunkType === "parent_text") parentIds.set(chunk.parentIndex, id);
@@ -82,7 +83,13 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       const page = pageMetadata(parsed, chunk);
       const locator = JSON.stringify({ startOffset: chunk.start, endOffset: chunk.end, resourceVersionId: version.id, processingRunId: runId, parentIndex: chunk.parentIndex, childIndex: chunk.childIndex ?? null, blockTypes: [...new Set([...(chunk.blockTypes || []), ...page.blockKinds])], pageStart: page.pages[0] || null, pageEnd: page.pages.at(-1) || null, pages: page.pages, forcedSplit: Boolean(chunk.forcedSplit) });
       insertChunk.run(id, version.id, runId, parentId, chunk.chunkType, chunk.sequence, chunk.content, chunk.contextHeader || null, chunk.start, chunk.end, locator, document.strategy, chunk.forcedSplit ? 1 : 0, now());
-      if (chunk.chunkType === "text") insertFts.run(id, [chunk.contextHeader, chunk.content].filter(Boolean).join("\n\n"), parsed.title || fresh.title || "");
+      if (chunk.chunkType === "text") {
+        insertFts.run(id, searchableText([chunk.contextHeader, chunk.content].filter(Boolean).join("\n\n")), parsed.title || fresh.title || "");
+        if (config.retrievalVectorEnabled !== false) {
+          const embeddingTask = queueEmbeddingTask(sqlite, { ownerType: "raw_chunk", ownerId: id, resourceVersionId: version.id, processingRunId: runId, reason: "resource-indexed", activeTaskCache });
+          audit("queued", "task", embeddingTask.id, { type: "retrieval:embed", ownerType: "raw_chunk", ownerId: id, resourceVersionId: version.id });
+        }
+      }
     }
     const outputSha256 = outputDigest(document);
     const timestamp = now();

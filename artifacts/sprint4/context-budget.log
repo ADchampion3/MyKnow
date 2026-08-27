@@ -1,0 +1,10 @@
+Sprint 4 context budget check
+Command: node scripts/retrieval-budget-check.js
+
+{"status":"passed","budget":{"total":119,"wiki":"72/72","raw":"47/48"},"truncated":true,"provenanceInContext":{"wiki":1,"raw":1}}
+
+Assertions covered:
+- Wiki/raw budgets are independent 60/40 allocations;
+- Wiki keeps matched/adjacent blocks when the full page exceeds budget;
+- raw output retains child chunk plus context header/parent context when available;
+- final markdown estimate is strict, truncation is explicit, and every context item has locator/provenance metadata.

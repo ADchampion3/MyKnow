@@ -3,6 +3,17 @@ const positiveInt = (name, value, fallback) => {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
   return parsed;
 };
+const boundedInt = (name, value, fallback, minimum, maximum) => {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
+  return parsed;
+};
+const booleanValue = (name, value, fallback) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (["1", "true", "yes", "on"].includes(String(value).toLowerCase())) return true;
+  if (["0", "false", "no", "off"].includes(String(value).toLowerCase())) return false;
+  throw new Error(`${name} must be true or false`);
+};
 
 export function loadConfig(env = process.env) {
   const provider = env.MODEL_PROVIDER || "mock";
@@ -27,7 +38,13 @@ export function loadConfig(env = process.env) {
     paddleOcrMaxConcurrency: positiveInt("PADDLE_OCR_MAX_CONCURRENCY", env.PADDLE_OCR_MAX_CONCURRENCY, 1),
     pdfPythonPath: env.PDF_PYTHON_PATH || "python",
     ocrMaxPages: positiveInt("OCR_MAX_PAGES", env.OCR_MAX_PAGES, 500),
-    hasModelApiKey: Boolean(env.MODEL_API_KEY)
+    hasModelApiKey: Boolean(env.MODEL_API_KEY),
+    retrievalVectorEnabled: booleanValue("RETRIEVAL_VECTOR_ENABLED", env.RETRIEVAL_VECTOR_ENABLED ?? env.VECTOR_SEARCH_ENABLED, true),
+    embeddingProvider: env.EMBEDDING_PROVIDER || "mock",
+    embeddingModel: env.EMBEDDING_MODEL || "mock-hash-v1",
+    embeddingDimensions: boundedInt("EMBEDDING_DIMENSIONS", env.EMBEDDING_DIMENSIONS, 32, 4, 4096),
+    embeddingFailureMode: env.EMBEDDING_FAILURE_MODE || "",
+    embeddingApiKey: env.EMBEDDING_API_KEY || ""
   };
 }
 import path from "node:path";

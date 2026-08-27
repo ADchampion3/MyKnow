@@ -13,9 +13,12 @@ const now = new Date().toISOString();
 sqlite.prepare("INSERT INTO knowledge_bases (id,name,status,created_at,updated_at) VALUES (?,?,?,?,?)").run(crypto.randomUUID(), "check", "active", now, now);
 assert.throws(() => sqlite.prepare("INSERT INTO knowledge_bases (id,name,status,created_at,updated_at) VALUES (?,?,?,?,?)").run(crypto.randomUUID(), "   ", "active", now, now));
 assert.throws(() => safeStoragePath("./data/resources", "../outside"));
-assert.equal(sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get().value, "sprint3-llm-wiki-v1");
+assert.equal(sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get().value, "sprint4-rag-retrieval-v1");
+assert.equal(sqlite.prepare("SELECT value FROM schema_meta WHERE key='derived_schema'").get().value, "sprint4-derived-ready");
 assert.ok(sqlite.prepare("PRAGMA index_list(tasks)").all().some((index) => index.name === "tasks_resource_active_idx"));
 assert.ok(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='wiki_pages'").get());
+assert.ok(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='retrieval_runs'").get());
+assert.ok(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='retrieval_embeddings'").get());
 sqlite.close();
 
 const legacy = createDatabase(":memory:").sqlite;

@@ -1,7 +1,9 @@
 export { createDatabase } from "./database/connection.js";
-export { migrate } from "./database/migrations.js";
+export { migrate, SCHEMA_VERSION } from "./database/migrations.js";
 export * from "./schema.js";
 export * from "./resources.js";
 export * from "./chunker.js";
 export * from "./ocr.js";
 export * from "./wiki.js";
+export * from "./embeddings.js";
+export * from "./retrieval.js";

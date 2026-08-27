@@ -1,0 +1,10 @@
+Sprint 4 graph expansion check
+Command: node scripts/retrieval-graph-check.js
+
+{"status":"passed","highConfidenceSeed":"fixture-seed","graph":[{"hop":1,"direction":"outbound","decay":0.5},{"hop":1,"direction":"inbound","decay":0.5},{"hop":2,"direction":"outbound","decay":0.25}],"lowConfidenceGraphCount":0,"rawOnlyGraphCount":0,"provenance":1}
+
+Assertions covered:
+- only Wiki seeds passing score >= 0.70 and margin >= 0.10 start traversal;
+- same knowledge base, active current page versions, both outbound and inbound edges;
+- maximum two hops, per-layer expansion cap 10, deterministic ordering and de-duplication;
+- raw chunks and low-confidence Wiki hits never start graph expansion.

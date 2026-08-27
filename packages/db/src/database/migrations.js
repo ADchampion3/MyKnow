@@ -1,4 +1,4 @@
-const SCHEMA_VERSION = "sprint3-llm-wiki-v1";
+const SCHEMA_VERSION = "sprint4-rag-retrieval-v1";
 
 const migration = `
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -33,6 +33,15 @@ CREATE INDEX wiki_page_versions_page_idx ON wiki_page_versions(page_id, created_
 CREATE INDEX wiki_page_blocks_version_idx ON wiki_page_blocks(page_version_id, ordinal);
 CREATE INDEX wiki_citations_resource_idx ON wiki_citations(resource_version_id, status);
 CREATE INDEX wiki_citations_page_version_idx ON wiki_citations(page_version_id, status);
+CREATE VIRTUAL TABLE wiki_fts USING fts5(page_id UNINDEXED, page_version_id UNINDEXED, title, content);
+CREATE TABLE wiki_link_edges (source_page_id TEXT NOT NULL REFERENCES wiki_pages(id), source_page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), target_page_id TEXT NOT NULL REFERENCES wiki_pages(id), link_text TEXT NOT NULL, PRIMARY KEY(source_page_id, source_page_version_id, target_page_id, link_text));
+CREATE INDEX wiki_link_edges_target_idx ON wiki_link_edges(target_page_id, source_page_id);
+CREATE INDEX wiki_link_edges_source_idx ON wiki_link_edges(source_page_id, source_page_version_id);
+CREATE TABLE retrieval_embeddings (id TEXT PRIMARY KEY, owner_type TEXT NOT NULL CHECK(owner_type IN ('wiki_page','raw_chunk')), owner_id TEXT NOT NULL, version_key TEXT NOT NULL, page_version_id TEXT REFERENCES wiki_page_versions(id), resource_version_id TEXT REFERENCES resource_versions(id), processing_run_id TEXT REFERENCES processing_runs(id), provider TEXT NOT NULL, model TEXT NOT NULL, dimensions INTEGER NOT NULL DEFAULT 0 CHECK(dimensions >= 0 AND dimensions <= 4096), vector_json TEXT, status TEXT NOT NULL DEFAULT 'ready' CHECK(status IN ('ready','failed')), error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_type, owner_id, version_key, provider, model), CHECK((owner_type='wiki_page' AND page_version_id IS NOT NULL AND resource_version_id IS NULL) OR (owner_type='raw_chunk' AND resource_version_id IS NOT NULL AND page_version_id IS NULL)));
+CREATE INDEX retrieval_embeddings_wiki_idx ON retrieval_embeddings(owner_type, page_version_id, status);
+CREATE INDEX retrieval_embeddings_raw_idx ON retrieval_embeddings(owner_type, resource_version_id, status);
+CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, query TEXT NOT NULL CHECK(length(trim(query)) BETWEEN 1 AND 200), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), wiki_top_k INTEGER NOT NULL CHECK(wiki_top_k BETWEEN 1 AND 20), raw_top_k INTEGER NOT NULL CHECK(raw_top_k BETWEEN 1 AND 20), context_budget_tokens INTEGER NOT NULL CHECK(context_budget_tokens BETWEEN 1 AND 50000), wiki_budget_tokens INTEGER NOT NULL CHECK(wiki_budget_tokens >= 0), raw_budget_tokens INTEGER NOT NULL CHECK(raw_budget_tokens >= 0), vector_enabled INTEGER NOT NULL DEFAULT 0 CHECK(vector_enabled IN (0,1)), vector_provider TEXT, vector_model TEXT, status TEXT NOT NULL DEFAULT 'succeeded' CHECK(status IN ('succeeded','failed')), wiki_seeds TEXT NOT NULL, raw_seeds TEXT NOT NULL, graph_expansion TEXT NOT NULL, provenance_lookups TEXT NOT NULL, context_items TEXT NOT NULL, context_markdown TEXT NOT NULL, metrics TEXT NOT NULL, vector_status TEXT NOT NULL, trace_json TEXT NOT NULL, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);
 `;
 
 const userObject = (sqlite) => sqlite.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index','view','trigger') AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
@@ -49,7 +58,7 @@ export function migrate(sqlite) {
   sqlite.transaction(() => {
     sqlite.exec(migration);
     sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('schema_version',?,?)").run(SCHEMA_VERSION, timestamp);
-    sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','ready',?)").run(timestamp);
+    sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint4-derived-ready',?)").run(timestamp);
   })();
   return { fresh: true, schemaVersion: SCHEMA_VERSION };
 }

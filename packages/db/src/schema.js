@@ -60,3 +60,15 @@ export const wikiTemplateVersions = sqliteTable("wiki_template_versions", {
 export const wikiCitations = sqliteTable("wiki_citations", {
   id: text("id").primaryKey(), pageVersionId: text("page_version_id").notNull(), blockKey: text("block_key"), resourceVersionId: text("resource_version_id").notNull(), locatorJson: text("locator_json").notNull(), status: text("status").notNull().default("active"), staleReason: text("stale_reason"), checkedAt: text("checked_at"), createdAt: text("created_at").notNull()
 });
+export const wikiFts = sqliteTable("wiki_fts", {
+  pageId: text("page_id").notNull(), pageVersionId: text("page_version_id").notNull(), title: text("title").notNull(), content: text("content").notNull()
+});
+export const wikiLinkEdges = sqliteTable("wiki_link_edges", {
+  sourcePageId: text("source_page_id").notNull(), sourcePageVersionId: text("source_page_version_id").notNull(), targetPageId: text("target_page_id").notNull(), linkText: text("link_text").notNull()
+});
+export const retrievalEmbeddings = sqliteTable("retrieval_embeddings", {
+  id: text("id").primaryKey(), ownerType: text("owner_type").notNull(), ownerId: text("owner_id").notNull(), versionKey: text("version_key").notNull(), pageVersionId: text("page_version_id"), resourceVersionId: text("resource_version_id"), processingRunId: text("processing_run_id"), provider: text("provider").notNull(), model: text("model").notNull(), dimensions: integer("dimensions").notNull().default(0), vectorJson: text("vector_json"), status: text("status").notNull().default("ready"), errorSummary: text("error_summary"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const retrievalRuns = sqliteTable("retrieval_runs", {
+  id: text("id").primaryKey(), query: text("query").notNull(), knowledgeBaseId: text("knowledge_base_id").notNull(), spaceId: text("space_id"), wikiTopK: integer("wiki_top_k").notNull(), rawTopK: integer("raw_top_k").notNull(), contextBudgetTokens: integer("context_budget_tokens").notNull(), wikiBudgetTokens: integer("wiki_budget_tokens").notNull(), rawBudgetTokens: integer("raw_budget_tokens").notNull(), vectorEnabled: integer("vector_enabled").notNull().default(0), vectorProvider: text("vector_provider"), vectorModel: text("vector_model"), status: text("status").notNull().default("succeeded"), wikiSeeds: text("wiki_seeds").notNull(), rawSeeds: text("raw_seeds").notNull(), graphExpansion: text("graph_expansion").notNull(), provenanceLookups: text("provenance_lookups").notNull(), contextItems: text("context_items").notNull(), contextMarkdown: text("context_markdown").notNull(), metrics: text("metrics").notNull(), vectorStatus: text("vector_status").notNull(), traceJson: text("trace_json").notNull(), errorCode: text("error_code"), errorSummary: text("error_summary"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});

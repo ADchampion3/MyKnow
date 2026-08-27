@@ -5,7 +5,7 @@ const transientCodes = new Set(["TRANSIENT_ERROR", "SQLITE_BUSY", "WORKER_INTERR
 const retryDelayMs = (attemptNumber) => attemptNumber <= 1 ? 1_000 : 5_000;
 const taskResourceVersion = (task) => task.resource_version_id || (() => { try { return JSON.parse(task.payload || "{}").resourceVersionId || null; } catch { return null; } })();
 
-export const createTaskRunner = ({ sqlite, workerId, audit, processResource, impactScan = async () => {} }) => {
+export const createTaskRunner = ({ sqlite, workerId, audit, processResource, impactScan = async () => {}, embedRetrieval = async () => {} }) => {
   const activeControllers = new Map();
   const claim = sqlite.transaction(() => {
     const timestamp = now();
@@ -80,6 +80,7 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
     try {
       if (task.type === "resource:process") await processResource({ ...task, signal: controller.signal });
       else if (task.type === "wiki:impact-scan") await impactScan({ ...task, signal: controller.signal });
+      else if (task.type === "retrieval:embed") await embedRetrieval({ ...task, signal: controller.signal });
       else if (task.type === "demo_failure") throw Object.assign(new Error("Deterministic demo failure"), { code: "PERMANENT_ERROR" });
       else if (task.type === "demo_retryable") throw Object.assign(new Error("Deterministic transient failure"), { code: "TRANSIENT_ERROR" });
       else if (task.type !== "demo_success") throw Object.assign(new Error("Unsupported task type"), { code: "PERMANENT_ERROR" });

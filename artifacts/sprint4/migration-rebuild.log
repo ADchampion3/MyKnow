@@ -1,0 +1,11 @@
+Sprint 4 database rebuild check
+Command: npm run check:wiki-rebuild
+
+{"status":"passed","before":{"resources":1,"resourceVersions":1,"auditLogs":1},"after":{"resources":1,"resourceVersions":1,"auditLogs":1},"backup":"<temporary-db>.pre-sprint4-<timestamp>.bak","failedRebuildPreservedDatabase":true,"schemaVersion":"sprint4-rag-retrieval-v1","derivedSchema":"sprint4-derived-ready"}
+
+Assertions covered:
+- referenced source blobs are verified before swap;
+- resource/version/audit rows and current/active pointers survive rebuild;
+- source storage remains present and unchanged;
+- a failed rebuild leaves the original database in place;
+- Wiki FTS, link edges, retrieval embeddings, retrieval runs, and raw FTS projections are available after rebuild.

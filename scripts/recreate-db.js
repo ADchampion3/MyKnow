@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createDatabase, migrate, readBytes, sha256 } from "@myknow/db";
+import { createDatabase, migrate, readBytes, rebuildRetrievalIndexes, SCHEMA_VERSION, sha256 } from "@myknow/db";
 
 const quote = (name) => `"${String(name).replaceAll('"', '""')}"`;
 const hasTable = (sqlite, name) => Boolean(sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','virtual table') AND name=?").get(name));
@@ -39,7 +39,7 @@ export const rebuildDatabase = ({ target, resourceStorageDir = path.resolve("dat
   if (path.extname(database).toLowerCase() !== ".db" || !fs.existsSync(database) || !fs.statSync(database).isFile()) throw new Error("database-file must be an existing .db file");
   const sourceCopy = `${database}.rebuild-source-${process.pid}-${Date.now()}.db`;
   const rebuilt = `${database}.rebuild-target-${process.pid}-${Date.now()}.db`;
-  const backup = `${database}.pre-sprint3-${Date.now()}.bak`;
+  const backup = `${database}.pre-sprint4-${Date.now()}.bak`;
   let source;
   let destination;
   let originalMoved = false;
@@ -87,12 +87,17 @@ export const rebuildDatabase = ({ target, resourceStorageDir = path.resolve("dat
       copy("wiki_page_versions");
       copy("wiki_page_blocks");
       copy("wiki_citations");
+      copy("wiki_fts");
+      copy("wiki_link_edges");
+      copy("retrieval_embeddings");
+      copy("retrieval_runs");
       for (const row of pointers.resources) destination.sqlite.prepare("UPDATE resources SET current_version_id=? WHERE id=?").run(row.pointer, row.id);
       for (const row of pointers.versions) destination.sqlite.prepare("UPDATE resource_versions SET active_processing_run_id=? WHERE id=?").run(row.pointer, row.id);
       for (const row of pointers.pages) destination.sqlite.prepare("UPDATE wiki_pages SET current_version_id=? WHERE id=?").run(row.pointer, row.id);
       for (const row of pointers.templates) destination.sqlite.prepare("UPDATE wiki_templates SET current_version_id=? WHERE id=?").run(row.pointer, row.id);
       return counts;
     })();
+    copied.retrievalDerived = rebuildRetrievalIndexes(destination.sqlite);
     destination.sqlite.close();
     destination = null;
     source.sqlite.close();
@@ -109,7 +114,7 @@ export const rebuildDatabase = ({ target, resourceStorageDir = path.resolve("dat
     const result = {
       database,
       backup,
-      schemaVersion: "sprint3-llm-wiki-v1",
+      schemaVersion: SCHEMA_VERSION,
       rawStoragePreserved: true,
       storage,
       before: { resources: resourcesBefore, resourceVersions: versionsBefore, auditLogs: auditBefore },

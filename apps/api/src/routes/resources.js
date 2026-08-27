@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chunkDocument, contentStorageKey, externalWikiMode, mimeForExtension, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
+import { chunkDocument, contentStorageKey, externalWikiMode, mimeForExtension, normalizeCanonicalText, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
 
 const textMimes = new Set(["text/plain", "text/markdown"]);
 const resourceStatuses = new Set(["pending", "processing", "indexed", "degraded", "failed", "archived"]);
@@ -322,6 +322,39 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (versionsMatch && method === "GET") {
     if (!ctx.resource(versionsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
     ctx.json(res, 200, sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(versionsMatch[1]).map((version) => versionPayload(ctx, version)), null, requestId);
+    return true;
+  }
+
+  const versionPreviewMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions\/([^/]+)\/preview$/);
+  if (versionPreviewMatch && method === "GET") {
+    const resource = ctx.resource(versionPreviewMatch[1]);
+    const found = ctx.version(versionPreviewMatch[2]);
+    if (!resource || !found || found.resource_id !== resource.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version not found"), requestId); return true; }
+    const parseOffset = (name) => {
+      const value = parsed.searchParams.get(name);
+      if (value === null || value === "") return null;
+      const offset = Number(value);
+      if (!Number.isInteger(offset) || offset < 0) throw fail(`${name} must be a non-negative integer`);
+      return offset;
+    };
+    try {
+      const startOffset = parseOffset("startOffset");
+      const endOffset = parseOffset("endOffset");
+      if ((startOffset === null) !== (endOffset === null) || (startOffset !== null && endOffset <= startOffset)) throw fail("startOffset and endOffset must be an ordered range");
+      const bytes = readVerified(config.resourceStorageDir, found.storage_key, found.byte_size, found.content_sha256, "source");
+      const sourceText = found.mime_type.startsWith("text/") ? normalizeCanonicalText(bytes.toString("utf8")) : null;
+      let range = null;
+      let snippet = null;
+      if (sourceText !== null && startOffset !== null) {
+        const characters = Array.from(sourceText);
+        if (endOffset > characters.length) throw fail("locator is outside the source version");
+        const contextStart = Math.max(0, startOffset - 160);
+        const contextEnd = Math.min(characters.length, endOffset + 160);
+        range = { startOffset, endOffset, contextStart, contextEnd };
+        snippet = characters.slice(contextStart, contextEnd).join("");
+      }
+      ctx.json(res, 200, { resourceId: resource.id, resourceVersionId: found.id, locator: startOffset === null ? null : { startOffset, endOffset }, range, snippet, source: { resourceId: resource.id, resourceVersionId: found.id, resourceName: resource.name, title: found.title, mimeType: found.mime_type, downloadPath: `/api/resources/${resource.id}/versions/${found.id}/download` } }, null, requestId);
+    } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
 

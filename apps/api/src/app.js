@@ -3,11 +3,12 @@ import { createApiContext } from "./context.js";
 import { createHttpTools } from "./http.js";
 import { handleKnowledgeBaseRoutes } from "./routes/knowledge-bases.js";
 import { handleResourceRoutes } from "./routes/resources.js";
+import { handleRetrievalRoutes } from "./routes/retrieval.js";
 import { handleSearchRoutes } from "./routes/search.js";
 import { handleTaskRoutes } from "./routes/tasks.js";
 import { handleWikiRoutes } from "./routes/wiki.js";
 
-const routeHandlers = [handleWikiRoutes, handleKnowledgeBaseRoutes, handleResourceRoutes, handleSearchRoutes, handleTaskRoutes];
+const routeHandlers = [handleWikiRoutes, handleKnowledgeBaseRoutes, handleResourceRoutes, handleRetrievalRoutes, handleSearchRoutes, handleTaskRoutes];
 
 export const createRequestHandler = ({ config, sqlite, db }) => {
   const ctx = createApiContext({ config, sqlite, db, http: createHttpTools({ config }) });

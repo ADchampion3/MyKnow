@@ -5,6 +5,7 @@ node_modules/
 .venv-pdf/
 .next/
 data/
+.manual-sprint4/
 apps/*/data/
 artifacts/sprint1/*.log
 artifacts/sprint2/pdf-e2e-storage-*/

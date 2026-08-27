@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
 import { loadConfig } from "@myknow/config";
-import { createDatabase, ensurePendingResourceTasks, migrate, now, scanWikiImpacts } from "@myknow/db";
+import { createDatabase, ensurePendingEmbeddingTasks, ensurePendingResourceTasks, migrate, now, scanWikiImpacts } from "@myknow/db";
 import { createMaterialReader } from "./materials.js";
 import { DefaultOcrProviderRegistry } from "./ocr/adapter.js";
 import { createResourceProcessor } from "./resources/processor.js";
 import { createTaskRunner } from "./tasks/runner.js";
+import { createEmbeddingTaskProcessor } from "./retrieval/embeddings.js";
 
 const config = loadConfig();
 const { sqlite } = createDatabase(config.databaseUrl);
@@ -21,10 +22,12 @@ const impactScan = async (task) => {
   if (!resourceVersionId) throw Object.assign(new Error("impact scan resource version is missing"), { code: "VALIDATION_ERROR" });
   scanWikiImpacts({ sqlite, resourceVersionId, resourceStorageDir: config.resourceStorageDir, audit });
 };
-const runner = createTaskRunner({ sqlite, workerId, audit, processResource, impactScan });
+const embedRetrieval = createEmbeddingTaskProcessor({ config, sqlite, audit });
+const runner = createTaskRunner({ sqlite, workerId, audit, processResource, impactScan, embedRetrieval });
 
 runner.recoverInterruptedTasks();
 ensurePendingResourceTasks(sqlite, "startup");
+if (config.retrievalVectorEnabled !== false) ensurePendingEmbeddingTasks(sqlite, "startup");
 
 let running = false;
 const poll = async () => {

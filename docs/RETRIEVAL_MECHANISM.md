@@ -2,7 +2,7 @@
 
 本文档记录当前已经实现的 Page-centric RAG 检索链路。实现的事实来源是 [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js)、[`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)、API/Worker 路由和 Sprint 4 规格；如果本文档与代码不一致，以代码和可复现检查为准。
 
-当前检索的目标是返回可解释、可回链、可审计的证据，不生成答案，也不调用 Agent 或 completion/chat model。当前 schema marker 为 `sprint4-rag-retrieval-v1`。
+当前检索的目标是返回可解释、可回链、可审计的证据，不生成答案，也不调用 Agent 或 completion/chat model。当前全局 schema marker 为 `sprint5-agent-tree-v1`，检索子系统版本为 `sprint4-rag-retrieval-v1`。
 
 ## 1. 端到端流程
 

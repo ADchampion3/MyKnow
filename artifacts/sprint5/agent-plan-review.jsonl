@@ -1,0 +1,3 @@
+{"runId":"6af69238-467e-452c-a211-ad76936a24dd","itemType":"page_create","evidenceStatus":"used","applied":"applied","rollback":"rolled_back"}
+{"status":"passed","materials":10,"recommendations":20,"accepted":14,"rejected":6,"acceptanceRate":0.7,"wikiPagesBeforeReview":0,"wikiPagesAfterReview":14,"auditedDecisions":20}
+{"status":"passed","pageUpdate":{"applied":"applied","rollback":"rolled_back","drift":"rejected"},"conflict":{"citations":2,"application":"not_applicable"},"tagBatch":{"items":2,"applied":2,"remainingAfterRollback":1},"auditedDecisions":7}

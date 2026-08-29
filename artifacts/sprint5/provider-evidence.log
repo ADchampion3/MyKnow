@@ -1,0 +1,3 @@
+{"provider":"openai-compatible","requests":1,"authorizationObserved":true,"pathChecked":true,"egressMode":"local_only","turns":1,"blockedCloudEgress":true,"missingKeyRejected":true}
+
+DeepSeek real-provider check: {"status":"passed","provider":"deepseek","model":"deepseek-chat","egressMode":"allow_cloud","answerStatus":"succeeded","evidenceStatus":"none","keyRecorded":false}. No key is stored here.

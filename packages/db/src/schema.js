@@ -60,6 +60,9 @@ export const wikiTemplateVersions = sqliteTable("wiki_template_versions", {
 export const wikiCitations = sqliteTable("wiki_citations", {
   id: text("id").primaryKey(), pageVersionId: text("page_version_id").notNull(), blockKey: text("block_key"), resourceVersionId: text("resource_version_id").notNull(), locatorJson: text("locator_json").notNull(), status: text("status").notNull().default("active"), staleReason: text("stale_reason"), checkedAt: text("checked_at"), createdAt: text("created_at").notNull()
 });
+export const wikiPageCitations = sqliteTable("wiki_page_citations", {
+  id: text("id").primaryKey(), pageVersionId: text("page_version_id").notNull(), blockKey: text("block_key"), sourcePageVersionId: text("source_page_version_id").notNull(), sourceBlockKey: text("source_block_key"), status: text("status").notNull().default("active"), staleReason: text("stale_reason"), checkedAt: text("checked_at"), createdAt: text("created_at").notNull()
+});
 export const wikiFts = sqliteTable("wiki_fts", {
   pageId: text("page_id").notNull(), pageVersionId: text("page_version_id").notNull(), title: text("title").notNull(), content: text("content").notNull()
 });
@@ -71,4 +74,22 @@ export const retrievalEmbeddings = sqliteTable("retrieval_embeddings", {
 });
 export const retrievalRuns = sqliteTable("retrieval_runs", {
   id: text("id").primaryKey(), query: text("query").notNull(), knowledgeBaseId: text("knowledge_base_id").notNull(), spaceId: text("space_id"), wikiTopK: integer("wiki_top_k").notNull(), rawTopK: integer("raw_top_k").notNull(), contextBudgetTokens: integer("context_budget_tokens").notNull(), wikiBudgetTokens: integer("wiki_budget_tokens").notNull(), rawBudgetTokens: integer("raw_budget_tokens").notNull(), vectorEnabled: integer("vector_enabled").notNull().default(0), vectorProvider: text("vector_provider"), vectorModel: text("vector_model"), status: text("status").notNull().default("succeeded"), wikiSeeds: text("wiki_seeds").notNull(), rawSeeds: text("raw_seeds").notNull(), graphExpansion: text("graph_expansion").notNull(), provenanceLookups: text("provenance_lookups").notNull(), contextItems: text("context_items").notNull(), contextMarkdown: text("context_markdown").notNull(), metrics: text("metrics").notNull(), vectorStatus: text("vector_status").notNull(), traceJson: text("trace_json").notNull(), errorCode: text("error_code"), errorSummary: text("error_summary"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const agentRuns = sqliteTable("agent_runs", {
+  id: text("id").primaryKey(), taskId: text("task_id").notNull(), runKind: text("run_kind").notNull(), knowledgeBaseId: text("knowledge_base_id"), spaceId: text("space_id"), scopeSnapshot: text("scope_snapshot").notNull(), promptText: text("prompt_text").notNull(), promptHash: text("prompt_hash").notNull(), promptVersion: text("prompt_version").notNull(), contractVersion: text("contract_version").notNull(), provider: text("provider").notNull(), model: text("model").notNull(), egressMode: text("egress_mode").notNull(), status: text("status").notNull().default("queued"), metrics: text("metrics").notNull().default("{}"), resultJson: text("result_json"), errorCode: text("error_code"), errorSummary: text("error_summary"), idempotencyKey: text("idempotency_key"), requestFingerprint: text("request_fingerprint"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const agentPlanItems = sqliteTable("agent_plan_items", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), ordinal: integer("ordinal").notNull(), itemType: text("item_type").notNull(), targetPageId: text("target_page_id"), basePageVersionId: text("base_page_version_id"), proposedJson: text("proposed_json").notNull(), citationsJson: text("citations_json").notNull().default("[]"), diffJson: text("diff_json"), risk: text("risk").notNull(), evidenceStatus: text("evidence_status").notNull(), reviewStatus: text("review_status").notNull().default("proposed"), applicationStatus: text("application_status").notNull().default("pending"), appliedPageVersionId: text("applied_page_version_id"), rollbackPageVersionId: text("rollback_page_version_id"), decisionReason: text("decision_reason"), decidedBy: text("decided_by"), decidedAt: text("decided_at"), appliedAt: text("applied_at"), errorCode: text("error_code"), errorSummary: text("error_summary"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const agentEvents = sqliteTable("agent_events", {
+  id: text("id").primaryKey(), runId: text("run_id").notNull(), sequence: integer("sequence").notNull(), eventType: text("event_type").notNull(), stage: text("stage"), toolName: text("tool_name"), durationMs: integer("duration_ms"), inputHash: text("input_hash"), outputHash: text("output_hash"), resultSize: integer("result_size"), inputTokens: integer("input_tokens"), outputTokens: integer("output_tokens"), cacheReadTokens: integer("cache_read_tokens"), costTotal: text("cost_total"), errorCode: text("error_code"), errorSummary: text("error_summary"), createdAt: text("created_at").notNull()
+});
+export const chatSessions = sqliteTable("chat_sessions", {
+  id: text("id").primaryKey(), knowledgeBaseId: text("knowledge_base_id"), scopeSnapshot: text("scope_snapshot").notNull(), status: text("status").notNull().default("active"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const chatMessages = sqliteTable("chat_messages", {
+  id: text("id").primaryKey(), sessionId: text("session_id").notNull(), role: text("role").notNull(), content: text("content").notNull(), status: text("status").notNull().default("pending"), agentRunId: text("agent_run_id"), taskId: text("task_id"), retrievalRunIds: text("retrieval_run_ids").notNull().default("[]"), answerJson: text("answer_json"), errorCode: text("error_code"), errorSummary: text("error_summary"), idempotencyKey: text("idempotency_key"), requestFingerprint: text("request_fingerprint"), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+export const wikiPageTags = sqliteTable("wiki_page_tags", {
+  pageId: text("page_id").notNull(), tagId: text("tag_id").notNull(), createdAt: text("created_at").notNull()
 });

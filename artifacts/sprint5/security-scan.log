@@ -1,0 +1,1 @@
+{"status":"passed","scanned":8,"clientSecretReferences":0,"eventPayload":"hashes-and-metrics-only","forbiddenWorkerCapabilities":["filesystem","shell","web","MCP","SQL"]}

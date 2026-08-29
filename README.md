@@ -32,15 +32,15 @@ The Wiki is the default knowledge-base projection while immutable resources, res
 
 The Wiki API covers the overview/tree, page metadata, Markdown versions, deterministic blocks and diff, restore, templates, citations, locator previews, and impact items. The Worker queues `wiki:impact-scan` after a successfully indexed resource version; deterministic scans mark old-version citations `needs_review` and unreadable targets `broken`. The Web workspace exposes page slug/space/parent metadata, source locator previews, and resource task status/error traces.
 
-The current schema marker is `sprint4-rag-retrieval-v1`. An empty database starts with the normal API/Worker commands. An existing Sprint 3 database must be rebuilt explicitly, preserving source storage and retained records:
+The current schema marker is `sprint5-agent-tree-v1`. An empty database starts with the normal API/Worker commands. An existing `sprint5-agent-review-v1` database is upgraded in place with the Wiki-page citation table; older unsupported databases must be rebuilt explicitly, preserving source storage and retained records:
 
 ```powershell
 node scripts/recreate-db.js --confirm <path-to-existing-db>
 ```
 
-The rebuild validates every referenced source blob before swapping only the exact database file, keeps a `.pre-sprint4-<timestamp>.bak` copy, and leaves the original database in place if validation or the build fails. Focused checks are `npm run check:wiki` (contract, layout, impact scan, and rebuild); `npm run check:all` includes them. Sprint 3 acceptance evidence is under [`artifacts/sprint3/`](artifacts/sprint3/), including the workspace screenshot and the source-read-only, version/diff, citation, layout, impact, and rebuild checks.
+The rebuild validates every referenced source blob before swapping only the exact database file, keeps a `.pre-sprint5-<timestamp>.bak` copy, and leaves the original database in place if validation or the build fails. Focused checks are `npm run check:wiki` and `npm run check:sprint5`; `npm run check:all` includes them. Sprint 5 acceptance evidence is under [`artifacts/sprint5/`](artifacts/sprint5/).
 
-Real LLM/Agent Wiki writes, RAG answer generation, multi-page review plans, and collaboration remain explicitly deferred to later Sprints.
+The Sprint 3/4 deterministic Wiki and retrieval flows remain available; Sprint 5 adds the Agent layer without replacing their source and audit records.
 
 ## Sprint 4 page-centric RAG retrieval
 
@@ -55,6 +55,14 @@ Only high-confidence Wiki results can seed explicit `wiki://UUID` links. Graph e
 Every run is persisted for replay through `GET /api/retrieval/runs/:id`. The response includes independent candidates, seed gates, graph paths, provenance, context items, 60/40 Wiki/raw budgets, truncation markers, provider status, and timing; replay strips raw result text and keeps only the generated context snapshot. Retrieval checker links open the exact Wiki page version or `GET /api/resources/:resourceId/versions/:versionId/preview?startOffset=...&endOffset=...` for a read-only raw version locator preview. The Web three-column workspace includes a retrieval checker and right-rail trace view; it does not generate answers.
 
 Sprint 4 focused checks are `npm run check:retrieval` (API contract/replay, graph boundaries, context budget, vector fallback, and a 100-document/5,000-child-chunk performance check). `npm run check:all` includes these checks. Acceptance evidence is under [`artifacts/sprint4/`](artifacts/sprint4/).
+
+## Sprint 5 Pi Agent and review flow
+
+The implementation plan is in [SPRINT5_PLAN.md](SPRINT5_PLAN.md), with issue-tracker scope under [.scratch/sprint5-agent-chat/](.scratch/sprint5-agent-chat/) and deliberate follow-up work in [SPRINT5_BACKLOG.md](SPRINT5_BACKLOG.md). Pi runs only in the Worker through the exact `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` versions in `apps/worker/package.json`; it does not read Pi auth, settings, or session files.
+
+Open chat is allowed without a knowledge-base scope. A scoped chat or organization run captures explicit resource versions, Wiki page versions, or a retrieval run before the Worker starts; read tools cannot escape that snapshot. Answers keep MyKnow citations separate from `modelSupplement`. Organization runs can only submit `page_create`, `page_update`, `tag_add`, `duplicate_finding`, or `conflict_finding` plan items. The API calculates diffs and risk, and Wiki writes happen only in a reviewed server transaction with optimistic version checks; rollback creates a new version or archives a created page.
+
+The Agent API includes `POST /api/chat/sessions`, `POST /api/chat/sessions/:id/messages`, `GET /api/chat/messages/:id`, `POST /api/agent/runs`, `GET /api/agent/runs/:id/plan`, `POST /api/agent/plan-items/:id/decision`, `POST /api/agent/plan-items/:id/branch-decision`, `PATCH /api/agent/plan-items/:id`, and `POST /api/agent/plan-items/:id/rollback`. Tree organization accepts only explicitly selected resource versions and Wiki page versions, creates one bounded hierarchy, and never writes `index` or `log`; branch approval applies the selected subtree in one transaction. Configure the server-side model boundary with `MODEL_PROVIDER`, `MODEL_NAME`, `MODEL_API_BASE_URL`, `MODEL_API_KEY`, and `AI_EGRESS_MODE` (`local_only` by default or `allow_cloud`). Never put `MODEL_API_KEY` in Web configuration or ordinary logs. The detailed tree contract and human review procedure are in [`docs/SPRINT5_TREE_WIKI.md`](docs/SPRINT5_TREE_WIKI.md). `npm run check:agent`, `npm run check:chat`, `npm run check:sprint5`, and `npm run check:deepseek` cover the focused contracts; the last command requires a process-only `MODEL_API_KEY` and records only a redacted status summary.
 
 ## Source layout
 
@@ -72,6 +80,7 @@ apps/worker/src/
   tasks/runner.js          # claim, attempts, retry, recovery, task states
   resources/processor.js   # reader -> canonical artifact -> chunks/FTS
   retrieval/embeddings.js  # optional embedding task processor
+  agent/                   # Pi runtime, allowlisted tools, prompts, and task processor
   materials.js             # MaterialReader adapters
 packages/db/src/
   index.js                 # stable package exports
@@ -81,6 +90,7 @@ packages/db/src/
   chunker.js               # canonical text and parent/child chunking
   text-tokenizer.js        # shared word/CJK token scanning
   retrieval.js              # dual-channel retrieval, graph, provenance, context, trace
+  agent.js                  # scoped Agent contracts, plans, review transactions, and chat views
   embeddings.js             # provider seam and deterministic mock embeddings
 ```
 
@@ -96,9 +106,10 @@ npm run check:db
  npm run check:materials
  npm run check:all
  npm run check:retrieval
+ npm run check:sprint5
 node --check apps/api/src/index.js
 node --check apps/web/src/index.js
 node --check apps/worker/src/index.js
 ```
 
-The Sprint 1 acceptance plan and evidence requirements are in `SPRINT1_PLAN.md`. RAG answer generation and Agent/Wiki changes remain deferred; Office, ASR, and file-URL adapters remain outside this optimization pass.
+The Sprint 1 acceptance plan and evidence requirements are in `SPRINT1_PLAN.md`. Office, ASR, and file-URL adapters remain outside this optimization pass.

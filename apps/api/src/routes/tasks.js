@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { refreshResourceStatus, tasks } from "@myknow/db";
 import { desc, eq } from "drizzle-orm";
 
+const agentRunForTask = (task) => { try { return JSON.parse(task.payload || "{}").agentRunId || null; } catch { return null; } };
+
 export const handleTaskRoutes = ({ ctx, request }) => {
   const { pathname, method, body, requestId, res } = request;
   const { db, sqlite } = ctx;
@@ -39,6 +41,11 @@ export const handleTaskRoutes = ({ ctx, request }) => {
           refreshResourceStatus(sqlite, version.resource_id, timestamp);
         }
       }
+      const agentRunId = agentRunForTask(task);
+      if (agentRunId && ["queued", "retrying"].includes(task.status)) {
+        sqlite.prepare("UPDATE agent_runs SET status='cancelled',error_code='TASK_CANCELLED',error_summary='Task cancellation requested',updated_at=? WHERE id=?").run(timestamp, agentRunId);
+        sqlite.prepare("UPDATE chat_messages SET status='failed',error_code='TASK_CANCELLED',error_summary='Task cancellation requested',updated_at=? WHERE agent_run_id=? AND role='assistant' AND status IN ('pending','retrying')").run(timestamp, agentRunId);
+      }
       ctx.audit("cancel_requested", "task", task.id, requestId, { status: task.status });
     })();
     ctx.json(res, 202, ctx.taskView(sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id)), null, requestId);
@@ -64,6 +71,12 @@ export const handleTaskRoutes = ({ ctx, request }) => {
         sqlite.prepare("UPDATE resource_versions SET status='pending',error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, version.id);
         refreshResourceStatus(sqlite, version.resource_id, timestamp);
         replacement = ctx.queueVersion(version.id, requestId, "task-manual-retry");
+      } else if (agentRunForTask(task)) {
+        const agentRunId = agentRunForTask(task);
+        sqlite.prepare("UPDATE tasks SET status='queued',progress=0,error_code=NULL,error_summary=NULL,next_attempt_at=NULL,finished_at=NULL,worker_id=NULL,cancel_requested=0,updated_at=? WHERE id=?").run(timestamp, task.id);
+        sqlite.prepare("UPDATE agent_runs SET status='queued',error_code=NULL,error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, agentRunId);
+        sqlite.prepare("UPDATE chat_messages SET status='pending',error_code=NULL,error_summary=NULL,updated_at=? WHERE agent_run_id=? AND role='assistant'").run(timestamp, agentRunId);
+        replacement = sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id);
       } else {
         replacement = { id: crypto.randomUUID(), type: task.type, payload: task.payload, status: "queued", progress: 0, retryLimit, retryCount: 0, createdAt: timestamp, updatedAt: timestamp };
         sqlite.prepare("INSERT INTO tasks (id,type,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,'queued',0,?,0,?,?)").run(replacement.id, replacement.type, replacement.payload, retryLimit, timestamp, timestamp);

@@ -2,10 +2,10 @@
 
 ## 1. 计划基线
 
-- **目标**：交付一个本地优先、单用户可用的完整闭环：导入资料 → 解析/索引 → 选择范围问答 → Agent 提议 Wiki 变更 → 人工审核后写入。当前已完成 Sprint 3 的 Wiki 双投影基础，Sprint 4-6 仍是后续规划。
+- **目标**：交付一个本地优先、单用户可用的完整闭环：导入资料 → 解析/索引 → 选择范围问答 → Agent 提议 Wiki 变更 → 人工审核后写入。当前代码已完成 Sprint 4 的 Page-centric RAG 检索基础；Sprint 5 已完成计划确认，尚待实现。
 - **周期**：6 个 Sprint，每个 Sprint 2 周，共 12 周；每个 Sprint 最后半天进行演示、验收和回归。
 - **当前可运行输入**：Markdown、TXT、native/OCR PDF；URL 抓取和 Base64 导入不属于当前 contract。当前 Worker 使用本地确定性处理和 mock Provider。
-- **后续规划能力**：URL 快照、OpenAI-compatible/Ollama Provider、RAG 问答和真实 LLM/Agent 整理仍按后续 Sprint 交付，不作为 Sprint 3 已实现能力。
+- **后续规划能力**：Sprint 5 交付 Pi Agent 开放问答/开放聊天、Wiki 整理变更计划和人工审核回滚；严格库内问答、SSE 和网页搜索继续留在技术债。URL 快照仍不属于当前输入 contract。
 - **明确不做**：多用户协作、实时编辑、原生客户端、自动网页同步、手写 OCR、知识图谱、多 Agent、自训练模型。
 - **验收证据**：每项验收都必须留下可复现的测试记录、截图或日志；“通过”以验收人实际操作结果为准，不以代码完成为准。
 
@@ -17,7 +17,7 @@
 - **派生知识层**：Wiki、摘要、标签、链接和冲突结果，均保存来源引用、操作者、时间、版本和 diff。
 - **任务状态**：`queued`、`running`、`succeeded`、`failed`、`retrying`；前端能看到进度、最近错误和重试入口。
 - **Wiki 引用状态**：`active`、`needs_review`、`broken`；资料新版本成功索引后扫描相关引用，无法读取目标或 locator 时标记为 `broken`。
-- **Agent 审核状态**：`proposed`、`approved`、`rejected`、`rolled_back`；这是 Sprint 5 的规划能力，不是当前 Sprint 3 的写入流程。
+- **Agent 审核与应用状态**：审核状态为 `proposed`、`approved`、`rejected`；应用状态另记录 `applied`、`stale`、`apply_failed`、`rolled_back`。这是 Sprint 5 的规划能力，不是当前代码已交付的写入流程。
 
 ### 2.2 每个 Sprint 的通用完成条件
 
@@ -125,26 +125,41 @@
 
 **明确延期**：开放问答、严格库内问答、completion/chat model 答案生成、Agent runtime、查询改写、自动 wikilink enrichment、Agent 驱动的多资料 Wiki 综合和 raw resource-space 关联。原 MVP 问答门槛保留为后续验收要求，不通过降低阈值完成 Sprint 4。
 
-### Sprint 5（第 9-10 周）：Agent 整理、变更计划与审核回滚
+本句是 Sprint 4 的出口边界；开放问答、completion/chat model 和 Agent runtime 已在本计划的 Sprint 5 重新纳入，严格库内问答和 SSE 仍然延期。
 
-**目标**：让 Agent 只提出可审阅的变更，用户逐项确认后才写入 Wiki。
+### Sprint 5（第 9-10 周）：Pi Agent 开放问答、Wiki 整理与审核回滚
+
+**状态**：计划已确认，详细契约见 [SPRINT5_PLAN.md](SPRINT5_PLAN.md)；本节描述目标，不代表当前代码已经交付。
+
+**目标**：使用 Pi Agent runtime 交付开放问答/开放聊天，并让 Agent 只提出可审阅的 Wiki 变更，用户审核后才写入。
 
 **交付范围**
 
-- Agent 生成/更新 Wiki、摘要、概念和标签、资料-Wiki 链接、重复与冲突发现。
-- 变更计划按章节/段落/事实条目拆分，展示建议文本、依据、引用、风险级别和影响范围。
-- 低风险标签支持批量审核；事实改写、冲突合并必须逐项明确确认；接受、拒绝、回滚。
-- Agent 步骤、工具调用、模型耗时/token/成本、失败原因可查看；任何写入前置审核闸门。
+- 在 Worker 中使用 Pi Agent SDK；Agent 只能调用 MyKnow 只读领域工具和结构化回答/变更计划终止工具。
+- 开放问答支持无知识库普通聊天，也支持明确资料/Wiki 范围的回答；库内证据与模型补充分开显示。
+- 整理 Agent 可自主检索、读取、比较和规划，生成 page_create、page_update、tag_add、duplicate_finding、conflict_finding。
+- 页面变更使用完整 Markdown 和服务端 diff；引用、locator、范围、base version 和风险由服务端校验。
+- 事实改写、页面创建和冲突处理逐项审核；页面标签新增支持最多 50 项批量审核。
+- 接受、拒绝、应用、失败、过期和回滚均可审计；应用使用不可变 Wiki 版本和 optimistic concurrency。
+- 使用数据库 task 轮询、retry、cancel、恢复和 trace；默认最多 8 轮、32 次工具调用、120 秒。
+- 使用 local_only/allow_cloud 出口闸门，默认 local_only；密钥不进前端、task payload、普通日志或业务记录。
+
+**Sprint 5 不纳入**
+
+- 严格库内问答、SSE 流式回答、网页搜索、URL 抓取和其他外部工具。
+- Pi 默认会话、文件系统/Shell 工具、Agent 直接写 Wiki、自动冲突合并和原始资料删除。
 
 **验收标准**
 
-1. 以至少 10 份资料运行整理任务，输出计划而非直接改写；计划中每条建议都有来源依据或标记为需人工补证。
-2. 用户拒绝一条、接受一条、批量接受标签后，Wiki 只反映已接受项；审计记录包含操作者、时间、依据和版本。
-3. 对同一事实提供两个冲突来源时，Agent 标记冲突并要求逐项确认，不能自动合并或覆盖原始资料。
-4. 回滚一次已接受变更，页面恢复到变更前语义并产生新版本，原变更记录仍可追踪。
-5. 运行 20 条真实整理建议抽样评审，至少 14 条可直接采纳（≥70%）；任何失败任务均可定位到步骤和错误原因。
+1. 20 条开放问题可以完成无知识库聊天或带范围回答；引用不伪造，no_match/index_unavailable 状态可见。
+2. 至少 10 份资料运行整理任务，只输出计划，不直接改写 Wiki；缺证据项不可应用。
+3. 拒绝、接受、标签批量审核、冲突发现和页面回滚均能通过 Web/API 演示并留下审计链。
+4. 20 条整理建议抽样中至少 14 条可直接采纳（≥70%）；失败任务可定位到阶段、Provider 和错误原因。
+5. 空库启动、Sprint 4 数据库安全重建、task retry/幂等/取消、API/Worker/Web focused checks 均可复现。
 
-**出口证据**：计划/审核/回滚审计链、重复/冲突样例、20 条建议评分表、Agent 调用日志。
+**出口证据**：详见 [artifacts/sprint5/evidence-manifest.md](artifacts/sprint5/evidence-manifest.md)，至少包括开放聊天、计划审核、Pi 事件、Provider、迁移、安全和 Web layout 证据。
+
+**技术债**：详见 [SPRINT5_BACKLOG.md](SPRINT5_BACKLOG.md)。SSE 和严格库内问答不得被当作 Sprint 5 未记录的验收欠账。
 
 ### Sprint 6（第 11-12 周）：隐私策略、可观察性、回归与发布硬化
 

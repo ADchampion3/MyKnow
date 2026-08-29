@@ -7,3 +7,4 @@ export * from "./ocr.js";
 export * from "./wiki.js";
 export * from "./embeddings.js";
 export * from "./retrieval.js";
+export * from "./agent.js";

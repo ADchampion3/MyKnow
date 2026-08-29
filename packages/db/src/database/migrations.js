@@ -1,4 +1,11 @@
-const SCHEMA_VERSION = "sprint4-rag-retrieval-v1";
+const SCHEMA_VERSION = "sprint5-agent-tree-v1";
+const PREVIOUS_SCHEMA_VERSION = "sprint5-agent-review-v1";
+
+const treeMigration = `
+CREATE TABLE IF NOT EXISTS wiki_page_citations (id TEXT PRIMARY KEY, page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), block_key TEXT, source_page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), source_block_key TEXT, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','needs_review','broken')), stale_reason TEXT, checked_at TEXT, created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS wiki_page_citations_source_idx ON wiki_page_citations(source_page_version_id, status);
+CREATE INDEX IF NOT EXISTS wiki_page_citations_page_version_idx ON wiki_page_citations(page_version_id, status);
+`;
 
 const migration = `
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -28,11 +35,14 @@ CREATE TABLE wiki_page_blocks (id TEXT PRIMARY KEY, page_version_id TEXT NOT NUL
 CREATE TABLE wiki_templates (id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), page_type TEXT NOT NULL CHECK(page_type IN ('concept','entity','source-summary','synthesis')), current_version_id TEXT REFERENCES wiki_template_versions(id) DEFERRABLE INITIALLY DEFERRED, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(knowledge_base_id, page_type));
 CREATE TABLE wiki_template_versions (id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES wiki_templates(id), definition_json TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE wiki_citations (id TEXT PRIMARY KEY, page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), block_key TEXT, resource_version_id TEXT NOT NULL REFERENCES resource_versions(id), locator_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','needs_review','broken')), stale_reason TEXT, checked_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE wiki_page_citations (id TEXT PRIMARY KEY, page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), block_key TEXT, source_page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), source_block_key TEXT, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','needs_review','broken')), stale_reason TEXT, checked_at TEXT, created_at TEXT NOT NULL);
 CREATE INDEX wiki_pages_kb_tree_idx ON wiki_pages(knowledge_base_id, parent_page_id, status, slug);
 CREATE INDEX wiki_page_versions_page_idx ON wiki_page_versions(page_id, created_at, id);
 CREATE INDEX wiki_page_blocks_version_idx ON wiki_page_blocks(page_version_id, ordinal);
 CREATE INDEX wiki_citations_resource_idx ON wiki_citations(resource_version_id, status);
 CREATE INDEX wiki_citations_page_version_idx ON wiki_citations(page_version_id, status);
+CREATE INDEX wiki_page_citations_source_idx ON wiki_page_citations(source_page_version_id, status);
+CREATE INDEX wiki_page_citations_page_version_idx ON wiki_page_citations(page_version_id, status);
 CREATE VIRTUAL TABLE wiki_fts USING fts5(page_id UNINDEXED, page_version_id UNINDEXED, title, content);
 CREATE TABLE wiki_link_edges (source_page_id TEXT NOT NULL REFERENCES wiki_pages(id), source_page_version_id TEXT NOT NULL REFERENCES wiki_page_versions(id), target_page_id TEXT NOT NULL REFERENCES wiki_pages(id), link_text TEXT NOT NULL, PRIMARY KEY(source_page_id, source_page_version_id, target_page_id, link_text));
 CREATE INDEX wiki_link_edges_target_idx ON wiki_link_edges(target_page_id, source_page_id);
@@ -42,6 +52,21 @@ CREATE INDEX retrieval_embeddings_wiki_idx ON retrieval_embeddings(owner_type, p
 CREATE INDEX retrieval_embeddings_raw_idx ON retrieval_embeddings(owner_type, resource_version_id, status);
 CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, query TEXT NOT NULL CHECK(length(trim(query)) BETWEEN 1 AND 200), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), wiki_top_k INTEGER NOT NULL CHECK(wiki_top_k BETWEEN 1 AND 20), raw_top_k INTEGER NOT NULL CHECK(raw_top_k BETWEEN 1 AND 20), context_budget_tokens INTEGER NOT NULL CHECK(context_budget_tokens BETWEEN 1 AND 50000), wiki_budget_tokens INTEGER NOT NULL CHECK(wiki_budget_tokens >= 0), raw_budget_tokens INTEGER NOT NULL CHECK(raw_budget_tokens >= 0), vector_enabled INTEGER NOT NULL DEFAULT 0 CHECK(vector_enabled IN (0,1)), vector_provider TEXT, vector_model TEXT, status TEXT NOT NULL DEFAULT 'succeeded' CHECK(status IN ('succeeded','failed')), wiki_seeds TEXT NOT NULL, raw_seeds TEXT NOT NULL, graph_expansion TEXT NOT NULL, provenance_lookups TEXT NOT NULL, context_items TEXT NOT NULL, context_markdown TEXT NOT NULL, metrics TEXT NOT NULL, vector_status TEXT NOT NULL, trace_json TEXT NOT NULL, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);
+CREATE TABLE agent_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), run_kind TEXT NOT NULL CHECK(run_kind IN ('answer','organize')), knowledge_base_id TEXT REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), scope_snapshot TEXT NOT NULL, prompt_text TEXT NOT NULL CHECK(length(prompt_text) BETWEEN 1 AND 4000), prompt_hash TEXT NOT NULL CHECK(length(prompt_hash)=64), prompt_version TEXT NOT NULL, contract_version TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, egress_mode TEXT NOT NULL CHECK(egress_mode IN ('local_only','allow_cloud')), status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','retrying','succeeded','failed','cancelled')), metrics TEXT NOT NULL DEFAULT '{}', result_json TEXT, error_code TEXT, error_summary TEXT, idempotency_key TEXT UNIQUE, request_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX agent_runs_status_idx ON agent_runs(status, created_at, id);
+CREATE INDEX agent_runs_kb_idx ON agent_runs(knowledge_base_id, created_at, id);
+CREATE TABLE agent_plan_items (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), ordinal INTEGER NOT NULL CHECK(ordinal >= 0), item_type TEXT NOT NULL CHECK(item_type IN ('page_create','page_update','tag_add','duplicate_finding','conflict_finding')), target_page_id TEXT REFERENCES wiki_pages(id), base_page_version_id TEXT REFERENCES wiki_page_versions(id), proposed_json TEXT NOT NULL, citations_json TEXT NOT NULL DEFAULT '[]', diff_json TEXT, risk TEXT NOT NULL CHECK(risk IN ('low','medium','high')), evidence_status TEXT NOT NULL CHECK(evidence_status IN ('used','needs_evidence','not_applicable')), review_status TEXT NOT NULL DEFAULT 'proposed' CHECK(review_status IN ('proposed','approved','rejected')), application_status TEXT NOT NULL DEFAULT 'pending' CHECK(application_status IN ('pending','applied','not_applicable','stale','apply_failed','rolled_back')), applied_page_version_id TEXT REFERENCES wiki_page_versions(id), rollback_page_version_id TEXT REFERENCES wiki_page_versions(id), decision_reason TEXT, decided_by TEXT, decided_at TEXT, applied_at TEXT, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(run_id, ordinal));
+CREATE INDEX agent_plan_items_run_idx ON agent_plan_items(run_id, ordinal);
+CREATE INDEX agent_plan_items_review_idx ON agent_plan_items(review_status, application_status, created_at);
+CREATE TABLE agent_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), sequence INTEGER NOT NULL CHECK(sequence >= 0), event_type TEXT NOT NULL, stage TEXT, tool_name TEXT, duration_ms INTEGER, input_hash TEXT, output_hash TEXT, result_size INTEGER, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cost_total TEXT, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, UNIQUE(run_id, sequence));
+CREATE INDEX agent_events_run_idx ON agent_events(run_id, sequence);
+CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, knowledge_base_id TEXT REFERENCES knowledge_bases(id), scope_snapshot TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX chat_sessions_kb_idx ON chat_sessions(knowledge_base_id, updated_at, id);
+CREATE TABLE chat_messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES chat_sessions(id), role TEXT NOT NULL CHECK(role IN ('user','assistant')), content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','retrying')), agent_run_id TEXT REFERENCES agent_runs(id), task_id TEXT REFERENCES tasks(id), retrieval_run_ids TEXT NOT NULL DEFAULT '[]', answer_json TEXT, error_code TEXT, error_summary TEXT, idempotency_key TEXT UNIQUE, request_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX chat_messages_session_idx ON chat_messages(session_id, created_at, id);
+CREATE INDEX chat_messages_run_idx ON chat_messages(agent_run_id, created_at, id);
+CREATE TABLE wiki_page_tags (page_id TEXT NOT NULL REFERENCES wiki_pages(id), tag_id TEXT NOT NULL REFERENCES tags(id), created_at TEXT NOT NULL, PRIMARY KEY(page_id, tag_id));
+CREATE INDEX wiki_page_tags_tag_idx ON wiki_page_tags(tag_id, page_id);
 `;
 
 const userObject = (sqlite) => sqlite.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index','view','trigger') AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
@@ -52,13 +77,21 @@ export function migrate(sqlite) {
   if (existing) {
     const hasMeta = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'").get();
     const marker = hasMeta ? sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get() : null;
+    if (marker?.value === PREVIOUS_SCHEMA_VERSION) {
+      sqlite.transaction(() => {
+        sqlite.exec(treeMigration);
+        sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
+        sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='derived_schema'").run("sprint5-agent-tree-derived-ready", timestamp);
+      })();
+      return { fresh: false, migratedFrom: PREVIOUS_SCHEMA_VERSION, schemaVersion: SCHEMA_VERSION };
+    }
     if (marker?.value !== SCHEMA_VERSION) throw Object.assign(new Error(`database schema is unsupported; recreate the database file for ${SCHEMA_VERSION}`), { code: "DATABASE_RECREATE_REQUIRED" });
     return { fresh: false, schemaVersion: SCHEMA_VERSION };
   }
   sqlite.transaction(() => {
     sqlite.exec(migration);
     sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('schema_version',?,?)").run(SCHEMA_VERSION, timestamp);
-    sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint4-derived-ready',?)").run(timestamp);
+    sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint5-agent-tree-derived-ready',?)").run(timestamp);
   })();
   return { fresh: true, schemaVersion: SCHEMA_VERSION };
 }

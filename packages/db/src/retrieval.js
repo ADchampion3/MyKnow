@@ -584,7 +584,7 @@ export const rebuildRetrievalIndexes = (sqlite) => {
       if (projection.indexed) wikiCount += 1;
       edgeCount += projection.edges;
     }
-    if (tableExists(sqlite, "schema_meta")) sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint4-derived-ready',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(new Date().toISOString());
+    if (tableExists(sqlite, "schema_meta")) sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint5-agent-tree-derived-ready',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(new Date().toISOString());
     return { rawRows: rawRows.length, wikiRows: wikiCount, linkEdges: edgeCount, embeddings: 0 };
   })();
 };

@@ -1,0 +1,1 @@
+{"status":"passed","schema":"sprint5-agent-tree-v1","preserved":["agent_runs","agent_events","chat_sessions","chat_messages","audit_logs"],"derived":"rebuilt"}

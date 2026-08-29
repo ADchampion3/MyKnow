@@ -2,6 +2,14 @@
   "name": "@myknow/worker",
   "version": "0.0.0",
   "type": "module",
-  "scripts": {"dev": "node src/index.js", "start": "node src/index.js"},
-  "dependencies": {"@myknow/config": "0.0.0", "@myknow/db": "0.0.0"}
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@myknow/config": "0.0.0",
+    "@myknow/db": "0.0.0"
+  }
 }

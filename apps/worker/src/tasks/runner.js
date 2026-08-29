@@ -4,8 +4,9 @@ import { now, refreshResourceStatus } from "@myknow/db";
 const transientCodes = new Set(["TRANSIENT_ERROR", "SQLITE_BUSY", "WORKER_INTERRUPTED", "PROCESSING_TIMEOUT"]);
 const retryDelayMs = (attemptNumber) => attemptNumber <= 1 ? 1_000 : 5_000;
 const taskResourceVersion = (task) => task.resource_version_id || (() => { try { return JSON.parse(task.payload || "{}").resourceVersionId || null; } catch { return null; } })();
+const taskAgentRun = (task) => { try { return JSON.parse(task.payload || "{}").agentRunId || null; } catch { return null; } };
 
-export const createTaskRunner = ({ sqlite, workerId, audit, processResource, impactScan = async () => {}, embedRetrieval = async () => {} }) => {
+export const createTaskRunner = ({ sqlite, workerId, audit, processResource, impactScan = async () => {}, embedRetrieval = async () => {}, processAgent = async () => {} }) => {
   const activeControllers = new Map();
   const claim = sqlite.transaction(() => {
     const timestamp = now();
@@ -37,6 +38,14 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
     audit(status, "resource_version", version.id, { error: task.errorSummary, errorCode: task.errorCode, attempt: task.attempt });
   };
 
+  const updateAgentAfterFailure = (task, timestamp, status, errorCode, errorSummary) => {
+    const runId = taskAgentRun(task);
+    if (!runId) return;
+    const runStatus = errorCode === "TASK_CANCELLED" ? "cancelled" : status;
+    sqlite.prepare("UPDATE agent_runs SET status=?,error_code=?,error_summary=?,updated_at=? WHERE id=? AND status NOT IN ('succeeded','cancelled')").run(runStatus, errorCode, errorSummary, timestamp, runId);
+    sqlite.prepare("UPDATE chat_messages SET status=?,error_code=?,error_summary=?,updated_at=? WHERE agent_run_id=? AND role='assistant' AND status IN ('pending','retrying')").run(status === "retrying" ? "retrying" : "failed", errorCode, errorSummary, timestamp, runId);
+  };
+
   const failTask = sqlite.transaction((task, errorSummary, errorCode = null) => {
     const retryable = transientCodes.has(errorCode) && task.retry_count < task.retry_limit;
     const status = retryable ? "retrying" : "failed";
@@ -44,6 +53,7 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
     const nextAttemptAt = retryable ? new Date(Date.now() + retryDelayMs(task.retry_count)).toISOString() : null;
     sqlite.prepare("UPDATE tasks SET status=?,progress=0,error_code=?,error_summary=?,next_attempt_at=?,finished_at=?,worker_id=NULL,updated_at=? WHERE id=?").run(status, errorCode, errorSummary, nextAttemptAt, retryable ? null : timestamp, timestamp, task.id);
     sqlite.prepare("UPDATE task_attempts SET status='failed',finished_at=?,error_code=?,error_summary=? WHERE task_id=? AND attempt_number=?").run(timestamp, errorCode, errorSummary, task.id, task.attempt);
+    updateAgentAfterFailure(task, timestamp, status, errorCode, errorSummary);
     updateResourceAfterFailure({ ...task, errorSummary, errorCode }, timestamp, status);
     audit(status, "task", task.id, { workerId, attempt: task.attempt, errorSummary, errorCode, retryCount: task.retry_count, nextAttemptAt });
     return status;
@@ -68,6 +78,7 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
         sqlite.prepare("UPDATE resource_versions SET status=?,error_summary=?,updated_at=? WHERE id=?").run(version.active_processing_run_id ? "indexed" : (retryable ? "pending" : "failed"), errorSummary, timestamp, version.id);
         refreshResourceStatus(sqlite, version.resource_id, timestamp);
       }
+      updateAgentAfterFailure(task, timestamp, status, errorCode, errorSummary);
       audit(cancelled ? "cancelled" : "interrupted", "task", task.id, { workerId, retryCount, status, errorCode });
     }
   });
@@ -81,6 +92,7 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
       if (task.type === "resource:process") await processResource({ ...task, signal: controller.signal });
       else if (task.type === "wiki:impact-scan") await impactScan({ ...task, signal: controller.signal });
       else if (task.type === "retrieval:embed") await embedRetrieval({ ...task, signal: controller.signal });
+      else if (task.type === "agent:answer" || task.type === "agent:organize") await processAgent({ ...task, signal: controller.signal });
       else if (task.type === "demo_failure") throw Object.assign(new Error("Deterministic demo failure"), { code: "PERMANENT_ERROR" });
       else if (task.type === "demo_retryable") throw Object.assign(new Error("Deterministic transient failure"), { code: "TRANSIENT_ERROR" });
       else if (task.type !== "demo_success") throw Object.assign(new Error("Unsupported task type"), { code: "PERMANENT_ERROR" });

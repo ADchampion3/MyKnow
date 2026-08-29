@@ -6,6 +6,7 @@ import { DefaultOcrProviderRegistry } from "./ocr/adapter.js";
 import { createResourceProcessor } from "./resources/processor.js";
 import { createTaskRunner } from "./tasks/runner.js";
 import { createEmbeddingTaskProcessor } from "./retrieval/embeddings.js";
+import { createAgentTaskProcessor } from "./agent/processor.js";
 
 const config = loadConfig();
 const { sqlite } = createDatabase(config.databaseUrl);
@@ -23,7 +24,8 @@ const impactScan = async (task) => {
   scanWikiImpacts({ sqlite, resourceVersionId, resourceStorageDir: config.resourceStorageDir, audit });
 };
 const embedRetrieval = createEmbeddingTaskProcessor({ config, sqlite, audit });
-const runner = createTaskRunner({ sqlite, workerId, audit, processResource, impactScan, embedRetrieval });
+const processAgent = createAgentTaskProcessor({ config, sqlite, audit: (eventType, entityType, entityId, metadata) => audit(eventType, entityType, entityId, metadata) });
+const runner = createTaskRunner({ sqlite, workerId, audit, processResource, impactScan, embedRetrieval, processAgent });
 
 runner.recoverInterruptedTasks();
 ensurePendingResourceTasks(sqlite, "startup");

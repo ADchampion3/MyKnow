@@ -18,6 +18,8 @@ const booleanValue = (name, value, fallback) => {
 export function loadConfig(env = process.env) {
   const provider = env.MODEL_PROVIDER || "mock";
   if (!provider) throw new Error("MODEL_PROVIDER is required");
+  const aiEgressMode = env.AI_EGRESS_MODE || "local_only";
+  if (!["local_only", "allow_cloud"].includes(aiEgressMode)) throw new Error("AI_EGRESS_MODE must be local_only or allow_cloud");
   const rawDatabaseUrl = env.DATABASE_URL || "file:./data/myknow.db";
   const databaseUrl = rawDatabaseUrl.startsWith("file:./") ? `file:${path.resolve(repoRoot, rawDatabaseUrl.slice(5))}` : rawDatabaseUrl;
   return {
@@ -29,8 +31,13 @@ export function loadConfig(env = process.env) {
     resourceMaxBytes: positiveInt("RESOURCE_MAX_BYTES", env.RESOURCE_MAX_BYTES, 2_000_000),
     resourceParserTimeoutMs: positiveInt("RESOURCE_PARSER_TIMEOUT_MS", env.RESOURCE_PARSER_TIMEOUT_MS, 120_000),
     modelProvider: provider,
+    modelName: env.MODEL_NAME || (provider === "mock" ? "myknow-mock" : "deepseek-chat"),
     modelApiBaseUrl: env.MODEL_API_BASE_URL || "",
     modelApiKey: env.MODEL_API_KEY || "",
+    aiEgressMode,
+    agentMaxTurns: boundedInt("AGENT_MAX_TURNS", env.AGENT_MAX_TURNS, 8, 1, 8),
+    agentMaxToolCalls: boundedInt("AGENT_MAX_TOOL_CALLS", env.AGENT_MAX_TOOL_CALLS, 32, 1, 32),
+    agentTimeoutMs: boundedInt("AGENT_TIMEOUT_MS", env.AGENT_TIMEOUT_MS, 120_000, 1_000, 120_000),
     paddleOcrJobUrl: env.PADDLE_OCR_JOB_URL || "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
     paddleOcrToken: env.PADDLE_OCR_TOKEN || "",
     paddleOcrModel: env.PADDLE_OCR_MODEL || "PaddleOCR-VL-1.6",
@@ -52,3 +59,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+
+try {
+  process.loadEnvFile?.(path.join(repoRoot, ".env"));
+} catch (error) {
+  if (error?.code !== "ENOENT") throw error;
+}

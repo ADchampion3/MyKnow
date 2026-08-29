@@ -109,10 +109,27 @@ const citationView = (sqlite, row) => {
   };
 };
 
+const pageCitationView = (sqlite, row) => {
+  const source = sqlite.prepare("SELECT p.id AS page_id,p.title,p.slug,p.page_type,v.id AS version_id,v.content_sha256,v.created_at FROM wiki_page_versions v JOIN wiki_pages p ON p.id=v.page_id WHERE v.id=?").get(row.source_page_version_id);
+  return {
+    id: row.id,
+    sourceType: "wiki_page",
+    pageVersionId: row.page_version_id,
+    blockKey: row.block_key,
+    sourcePageVersionId: row.source_page_version_id,
+    sourceBlockKey: row.source_block_key,
+    status: row.status,
+    staleReason: row.stale_reason,
+    checkedAt: row.checked_at,
+    createdAt: row.created_at,
+    source: source ? { pageId: source.page_id, title: source.title, slug: source.slug, pageType: source.page_type, pageVersionId: source.version_id, contentSha256: source.content_sha256 } : null
+  };
+};
+
 const pageSummary = (sqlite, row) => {
   const version = row.current_version_id && sqlite.prepare("SELECT id,content_sha256,template_version_id,change_summary,created_at FROM wiki_page_versions WHERE id=?").get(row.current_version_id);
-  const citationCount = version ? sqlite.prepare("SELECT count(*) AS count FROM wiki_citations WHERE page_version_id=?").get(version.id).count : 0;
-  const pendingCitationCount = version ? sqlite.prepare("SELECT count(*) AS count FROM wiki_citations WHERE page_version_id=? AND status IN ('needs_review','broken')").get(version.id).count : 0;
+  const citationCount = version ? sqlite.prepare("SELECT (SELECT count(*) FROM wiki_citations WHERE page_version_id=?) + (SELECT count(*) FROM wiki_page_citations WHERE page_version_id=?) AS count").get(version.id, version.id).count : 0;
+  const pendingCitationCount = version ? sqlite.prepare("SELECT (SELECT count(*) FROM wiki_citations WHERE page_version_id=? AND status IN ('needs_review','broken')) + (SELECT count(*) FROM wiki_page_citations WHERE page_version_id=? AND status IN ('needs_review','broken')) AS count").get(version.id, version.id).count : 0;
   return {
     id: row.id,
     knowledgeBaseId: row.knowledge_base_id,
@@ -135,6 +152,7 @@ const pageSummary = (sqlite, row) => {
 const versionView = (sqlite, row, { includeContent = true, compareVersion = null } = {}) => {
   const blocks = sqlite.prepare("SELECT * FROM wiki_page_blocks WHERE page_version_id=? ORDER BY ordinal,id").all(row.id);
   const citations = sqlite.prepare("SELECT * FROM wiki_citations WHERE page_version_id=? ORDER BY created_at,id").all(row.id);
+  const pageCitations = sqlite.prepare("SELECT * FROM wiki_page_citations WHERE page_version_id=? ORDER BY created_at,id").all(row.id);
   const result = {
     id: row.id,
     pageId: row.page_id,
@@ -146,7 +164,7 @@ const versionView = (sqlite, row, { includeContent = true, compareVersion = null
     createdAt: row.created_at,
     links: wikiLinksFromMarkdown(row.content_markdown),
     blocks: blocks.map((block) => ({ id: block.id, blockKey: block.block_key, blockType: block.block_type, ordinal: block.ordinal, headingPath: parseStored(block.heading_path, []), contentMarkdown: block.content_markdown, contentSha256: block.content_sha256 })),
-    citations: citations.map((citation) => citationView(sqlite, citation))
+    citations: [...citations.map((citation) => citationView(sqlite, citation)), ...pageCitations.map((citation) => pageCitationView(sqlite, citation))]
   };
   if (includeContent) result.contentMarkdown = row.content_markdown;
   if (compareVersion) result.diff = diffMarkdown(compareVersion.content_markdown, row.content_markdown);
@@ -217,6 +235,9 @@ const copyCitations = (sqlite, fromVersionId, toVersionId, timestamp) => {
   for (const citation of sqlite.prepare("SELECT * FROM wiki_citations WHERE page_version_id=? ORDER BY created_at,id").all(fromVersionId)) {
     sqlite.prepare("INSERT INTO wiki_citations (id,page_version_id,block_key,resource_version_id,locator_json,status,stale_reason,checked_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)").run(crypto.randomUUID(), toVersionId, citation.block_key, citation.resource_version_id, citation.locator_json, citation.status, citation.stale_reason, citation.checked_at || timestamp, timestamp);
   }
+  for (const citation of sqlite.prepare("SELECT * FROM wiki_page_citations WHERE page_version_id=? ORDER BY created_at,id").all(fromVersionId)) {
+    sqlite.prepare("INSERT INTO wiki_page_citations (id,page_version_id,block_key,source_page_version_id,source_block_key,status,stale_reason,checked_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)").run(crypto.randomUUID(), toVersionId, citation.block_key, citation.source_page_version_id, citation.source_block_key, citation.status, citation.stale_reason, citation.checked_at || timestamp, timestamp);
+  }
 };
 
 const insertPageVersion = (ctx, page, { contentMarkdown, baseVersionId, changeSummary = null, restoreOfVersionId = null, citations = undefined, requestId }) => {
@@ -265,7 +286,7 @@ const overview = (ctx, knowledgeBaseId) => {
   const base = kb(ctx, knowledgeBaseId);
   const rows = ctx.sqlite.prepare("SELECT * FROM wiki_pages WHERE knowledge_base_id=? AND status <> 'archived' ORDER BY CASE page_type WHEN 'index' THEN 0 WHEN 'log' THEN 1 ELSE 2 END, title, id").all(knowledgeBaseId);
   const normalPages = rows.filter((row) => !SYSTEM_TYPES.has(row.page_type));
-  const pending = ctx.sqlite.prepare("SELECT count(*) AS count FROM wiki_citations c JOIN wiki_page_versions v ON v.id=c.page_version_id JOIN wiki_pages p ON p.id=v.page_id WHERE p.knowledge_base_id=? AND c.status IN ('needs_review','broken')").get(knowledgeBaseId).count;
+  const pending = ctx.sqlite.prepare("SELECT (SELECT count(*) FROM wiki_citations c JOIN wiki_page_versions v ON v.id=c.page_version_id JOIN wiki_pages p ON p.id=v.page_id WHERE p.knowledge_base_id=? AND c.status IN ('needs_review','broken')) + (SELECT count(*) FROM wiki_page_citations c JOIN wiki_page_versions v ON v.id=c.page_version_id JOIN wiki_pages p ON p.id=v.page_id WHERE p.knowledge_base_id=? AND c.status IN ('needs_review','broken')) AS count").get(knowledgeBaseId, knowledgeBaseId).count;
   const candidates = ctx.sqlite.prepare("SELECT DISTINCT r.id,r.name,r.status,r.current_version_id,r.wiki_mode,CASE WHEN r.wiki_mode IS NULL THEN kb.wiki_default_mode ELSE r.wiki_mode END AS effective_mode FROM resources r JOIN resource_knowledge_bases rkb ON rkb.resource_id=r.id JOIN knowledge_bases kb ON kb.id=rkb.knowledge_base_id WHERE rkb.knowledge_base_id=? AND r.status <> 'archived' AND COALESCE(r.wiki_mode,kb.wiki_default_mode)='enabled' ORDER BY r.updated_at DESC,r.id DESC").all(knowledgeBaseId).map((row) => ({ ...row, wikiMode: externalWikiMode(row.effective_mode) }));
   const events = ctx.sqlite.prepare(`
     WITH scope(id) AS (VALUES (?)),
@@ -526,7 +547,9 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
       const versionId = parsed.searchParams.get("versionId") || page.current_version_id;
       const version = ctx.sqlite.prepare("SELECT id FROM wiki_page_versions WHERE id=? AND page_id=?").get(versionId, page.id);
       if (!version) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki page version not found"), requestId); return true; }
-      ctx.json(res, 200, ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE page_version_id=? ORDER BY created_at,id").all(version.id).map((row) => citationView(ctx.sqlite, row)), null, requestId);
+      const resourceCitations = ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE page_version_id=? ORDER BY created_at,id").all(version.id).map((row) => citationView(ctx.sqlite, row));
+      const pageCitations = ctx.sqlite.prepare("SELECT * FROM wiki_page_citations WHERE page_version_id=? ORDER BY created_at,id").all(version.id).map((row) => pageCitationView(ctx.sqlite, row));
+      ctx.json(res, 200, [...resourceCitations, ...pageCitations], null, requestId);
       return true;
     }
     try {
@@ -591,8 +614,10 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
   }
   if (citationMatch && method === "GET") {
     const citation = ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE id=?").get(citationMatch[1]);
-    if (!citation) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Citation not found"), requestId); return true; }
-    ctx.json(res, 200, citationView(ctx.sqlite, citation), null, requestId);
+    if (citation) { ctx.json(res, 200, citationView(ctx.sqlite, citation), null, requestId); return true; }
+    const pageCitation = ctx.sqlite.prepare("SELECT * FROM wiki_page_citations WHERE id=?").get(citationMatch[1]);
+    if (!pageCitation) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Citation not found"), requestId); return true; }
+    ctx.json(res, 200, pageCitationView(ctx.sqlite, pageCitation), null, requestId);
     return true;
   }
   return false;

@@ -1,7 +1,19 @@
 import crypto from "node:crypto";
-import { tokenizeParts } from "./text-tokenizer.js";
+import { normalizeTokenCounter, tokenizeParts } from "./text-tokenizer.js";
 
 export const DEFAULT_EMBEDDING_DIMENSIONS = 32;
+
+export const embeddingInputSha256 = (text) => crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
+
+export const embeddingInputText = ({ ownerType, title = "", content = "", contextHeader = "" }) => ownerType === "wiki_page" ? `${title}\n${content}` : [contextHeader, content].filter(Boolean).join("\n\n");
+
+export const validateEmbeddingVector = (vector, expectedDimensions = null) => {
+  if (!Array.isArray(vector) || vector.length < 4 || vector.length > 4096 || (expectedDimensions !== null && vector.length !== expectedDimensions) || vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+    throw fail(expectedDimensions !== null ? `embedding vector must contain ${expectedDimensions} finite values` : "embedding vector must contain finite values", expectedDimensions !== null ? "EMBEDDING_DIMENSION_MISMATCH" : "EMBEDDING_RESPONSE_INVALID");
+  }
+  if (!vector.some((value) => value !== 0)) throw fail("embedding vector must not be empty", "EMBEDDING_RESPONSE_INVALID");
+  return vector;
+};
 
 const fail = (message, code) => Object.assign(new Error(message), { code });
 const dimensionsFor = (value) => {
@@ -29,6 +41,15 @@ const mockVector = (value, dimensions) => {
 };
 
 const HTTP_PROVIDER_NAMES = new Set(["openai", "openai-compatible"]);
+const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+const isLocalEndpoint = (value) => {
+  try {
+    const url = new URL(String(value || "").trim());
+    return ["http:", "https:"].includes(url.protocol) && localHosts.has(url.hostname.replace(/^\[|\]$/g, "").toLowerCase());
+  } catch {
+    return false;
+  }
+};
 const embeddingEndpoint = (baseUrl) => {
   let url;
   try { url = new URL(String(baseUrl || "").trim()); }
@@ -41,8 +62,7 @@ const embeddingEndpoint = (baseUrl) => {
 
 const responseVector = (payload) => {
   const vector = payload?.data?.[0]?.embedding;
-  if (!Array.isArray(vector) || vector.length < 4 || vector.length > 4096 || vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) throw fail("embedding provider returned an invalid vector", "EMBEDDING_RESPONSE_INVALID");
-  return vector;
+  return validateEmbeddingVector(vector);
 };
 
 export const cosineSimilarity = (left, right) => {
@@ -62,11 +82,12 @@ export const cosineSimilarity = (left, right) => {
   return dot / Math.sqrt(leftLength * rightLength);
 };
 
-export const createEmbeddingProvider = (config = {}) => {
+export const createEmbeddingProvider = (config = {}, { tokenizer = config.embeddingTokenizer } = {}) => {
   const enabled = config.retrievalVectorEnabled !== false;
   const providerName = String(config.embeddingProvider || "mock").trim().toLowerCase() || "mock";
   const model = String(config.embeddingModel || "mock-hash-v1").trim() || "mock-hash-v1";
   const dimensions = dimensionsFor(config.embeddingDimensions);
+  const tokenCounter = normalizeTokenCounter(tokenizer);
   const info = { provider: providerName, model, dimensions };
 
   const unavailable = (message = "embedding provider is unavailable", code = "EMBEDDING_PROVIDER_UNAVAILABLE") => {
@@ -76,6 +97,10 @@ export const createEmbeddingProvider = (config = {}) => {
   return {
     ...info,
     enabled,
+    tokenizer: tokenCounter,
+    tokenizerAvailable: Boolean(tokenCounter),
+    tokenization: tokenCounter ? "provider" : "heuristic",
+    countTokens: (text) => tokenCounter ? tokenCounter.countTokens(text) : null,
     async embedText(text, { signal } = {}) {
       if (signal?.aborted) unavailable("embedding request was cancelled", "TASK_CANCELLED");
       if (!enabled || providerName === "none" || providerName === "disabled") unavailable("embedding retrieval is disabled", "EMBEDDING_DISABLED");
@@ -88,6 +113,7 @@ export const createEmbeddingProvider = (config = {}) => {
       }
       if (!HTTP_PROVIDER_NAMES.has(providerName)) unavailable(`embedding provider '${providerName}' is not configured`, "EMBEDDING_PROVIDER_UNAVAILABLE");
       if (typeof text !== "string" || !text.trim()) throw fail("embedding text must be a non-empty string", "VALIDATION_ERROR");
+      if (config.aiEgressMode === "local_only" && !isLocalEndpoint(config.embeddingApiBaseUrl)) unavailable("embedding egress is blocked in local_only mode", "EMBEDDING_EGRESS_BLOCKED");
       const endpoint = embeddingEndpoint(config.embeddingApiBaseUrl);
       const headers = { "content-type": "application/json" };
       const apiKey = String(config.embeddingApiKey || "").trim();
@@ -104,6 +130,7 @@ export const createEmbeddingProvider = (config = {}) => {
       try { payload = await response.json(); }
       catch { throw fail("embedding provider returned invalid JSON", "EMBEDDING_RESPONSE_INVALID"); }
       const vector = responseVector(payload);
+      validateEmbeddingVector(vector, dimensions);
       return { ...info, dimensions: vector.length, requestedDimensions: dimensions, vector, durationMs: Date.now() - started };
     }
   };

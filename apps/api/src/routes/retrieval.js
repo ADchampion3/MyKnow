@@ -3,6 +3,7 @@ import { executeRetrieval, getRetrievalRun, isUuid } from "@myknow/db";
 export const handleRetrievalRoutes = async ({ ctx, request }) => {
   const { pathname, method, body, requestId, res } = request;
   if (pathname === "/api/retrieval/query" && method === "POST") {
+    ctx.assertEmbeddingEgress();
     try {
       const trace = await executeRetrieval({
         sqlite: ctx.sqlite,

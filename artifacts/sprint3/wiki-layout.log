@@ -1,5 +1,0 @@
-Command: npm run check:wiki-layout
-{"status":"passed","webStatus":200,"renderedWorkspace":true,"desktop":"1280px three-column grid","tablet":"1024px right rail hidden with core navigation","mobile":"700px stacked workspace"}
-Browser DOM verification:
-1280px: grid=260px 680px 340px, rightRail=block, pageMetadataControls=3, taskSection=true
-1024px: grid=220px 789px, leftRail=block, rightRail=none

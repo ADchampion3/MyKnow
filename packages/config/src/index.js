@@ -18,7 +18,7 @@ const booleanValue = (name, value, fallback) => {
 export function loadConfig(env = process.env) {
   const provider = env.MODEL_PROVIDER || "mock";
   if (!provider) throw new Error("MODEL_PROVIDER is required");
-  const aiEgressMode = env.AI_EGRESS_MODE || "local_only";
+  const aiEgressMode = env.AI_EGRESS_MODE || "allow_cloud";
   if (!["local_only", "allow_cloud"].includes(aiEgressMode)) throw new Error("AI_EGRESS_MODE must be local_only or allow_cloud");
   const rawDatabaseUrl = env.DATABASE_URL || "file:./data/myknow.db";
   const databaseUrl = rawDatabaseUrl.startsWith("file:./") ? `file:${path.resolve(repoRoot, rawDatabaseUrl.slice(5))}` : rawDatabaseUrl;
@@ -52,13 +52,58 @@ export function loadConfig(env = process.env) {
     embeddingDimensions: boundedInt("EMBEDDING_DIMENSIONS", env.EMBEDDING_DIMENSIONS, 32, 4, 4096),
     embeddingFailureMode: env.EMBEDDING_FAILURE_MODE || "",
     embeddingApiBaseUrl: env.EMBEDDING_API_BASE_URL || "",
-    embeddingApiKey: env.EMBEDDING_API_KEY || ""
+    embeddingApiKey: env.EMBEDDING_API_KEY || "",
+    derivedDataRetentionDays: boundedInt("DERIVED_DATA_RETENTION_DAYS", env.DERIVED_DATA_RETENTION_DAYS, 30, 1, 36500)
   };
 }
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+export const isLocalUrl = (value) => {
+  try {
+    const url = new URL(String(value || "").trim());
+    return ["http:", "https:"].includes(url.protocol) && LOCAL_HOSTS.has(url.hostname.replace(/^\[|\]$/g, "").toLowerCase());
+  } catch {
+    return false;
+  }
+};
+
+export const assertEgressAllowed = (config, url, code = "MODEL_EGRESS_BLOCKED", label = "provider") => {
+  if (config?.aiEgressMode === "local_only" && url && !isLocalUrl(url)) {
+    throw Object.assign(new Error(`${label} egress is blocked in local_only mode`), { code });
+  }
+};
+
+const secretKey = /(?:api[_-]?key|authorization|password|secret|token|private[_-]?key)/iu;
+const secretValue = /(?:sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~-]{8,})/giu;
+
+export const redactSecrets = (value) => {
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (!value || typeof value !== "object") return typeof value === "string" ? value.replace(secretValue, "[REDACTED]") : value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, secretKey.test(key) ? "[REDACTED]" : redactSecrets(item)]));
+};
+
+const auditPrivateKey = /^(?:prompt|promptText|prompt_text|fullPrompt|full_prompt|sourceText|source_text|rawText|raw_text|contentMarkdown|content_markdown|content)$/iu;
+export const redactAuditMetadata = (value) => {
+  if (Array.isArray(value)) return value.map(redactAuditMetadata);
+  if (!value || typeof value !== "object") return typeof value === "string" ? value.replace(secretValue, "[REDACTED]") : value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, secretKey.test(key) ? "[REDACTED]" : auditPrivateKey.test(key) ? "[OMITTED]" : redactAuditMetadata(item)]));
+};
+
+export const runtimeView = (config) => {
+  const mode = config.aiEgressMode || "local_only";
+  return {
+    aiEgressMode: mode,
+    egressWarning: mode === "allow_cloud" ? "允许云端 Provider；请求内容可能离开本机。" : "仅允许本机 Provider；云端外发会被拒绝。",
+    model: { provider: config.modelProvider, model: config.modelName },
+    embedding: { provider: config.embeddingProvider, model: config.embeddingModel, dimensions: config.embeddingDimensions },
+    ocr: { provider: config.paddleOcrModel ? "paddleocr" : null, model: config.paddleOcrModel || null }
+  };
+};
 
 try {
   process.loadEnvFile?.(path.join(repoRoot, ".env"));

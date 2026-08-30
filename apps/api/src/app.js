@@ -39,6 +39,7 @@ export const createRequestHandler = ({ config, sqlite, db }) => {
         requestId,
         idempotencyKey: typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"].trim() : null
       };
+      if (request.pathname === "/api/runtime" && request.method === "GET") return ctx.json(res, 200, ctx.runtimeView(), null, requestId);
       for (const handler of routeHandlers) if (await handler({ ctx, request })) return;
       return ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Route not found"), requestId);
     } catch (caught) {

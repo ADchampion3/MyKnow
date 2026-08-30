@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { readBytes, sha256 } from "./resources.js";
 import { cosineSimilarity, createEmbeddingProvider } from "./embeddings.js";
-import { tokenizeText } from "./text-tokenizer.js";
+import { estimateTokens, tokenizeText } from "./text-tokenizer.js";
 
 export const RETRIEVAL_SCHEMA_VERSION = "sprint4-rag-retrieval-v1";
 export const RETRIEVAL_DEFAULTS = Object.freeze({ wikiTopK: 5, rawTopK: 10, contextBudgetTokens: 8000, wikiBudgetRatio: 0.6, rawBudgetRatio: 0.4, maxTopK: 20, maxContextBudgetTokens: 50000 });
@@ -44,18 +44,31 @@ export const ftsQueryFor = (queryOrTokens) => {
   return tokens.terms.length ? tokens.terms.map(quoteFts).join(" OR ") : null;
 };
 
-export const estimateTokens = (value) => {
-  const characters = Array.from(String(value || "")).length;
-  return characters ? Math.max(1, Math.ceil(characters / 4)) : 0;
-};
+export { estimateTokens } from "./text-tokenizer.js";
 
-const truncateToTokens = (value, budget) => {
+const countBudgetTokens = (value, tokenizer = null) => tokenizer ? tokenizer.countTokens(value) : estimateTokens(value);
+
+const truncateToTokens = (value, budget, tokenizer = null) => {
   const characters = Array.from(String(value || ""));
   if (budget <= 0) return "";
-  if (estimateTokens(value) <= budget) return String(value || "");
+  if (countBudgetTokens(value, tokenizer) <= budget) return String(value || "");
+  if (tokenizer) {
+    let low = 0;
+    let high = characters.length;
+    let best = 0;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = characters.slice(0, middle).join("");
+      if (countBudgetTokens(candidate, tokenizer) <= budget) {
+        best = middle;
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    return characters.slice(0, best).join("");
+  }
   const maxCharacters = Math.max(1, budget * 4);
   let result = characters.slice(0, maxCharacters).join("");
-  while (result && estimateTokens(result) > budget) result = Array.from(result).slice(0, -1).join("");
+  while (result && countBudgetTokens(result, tokenizer) > budget) result = Array.from(result).slice(0, -1).join("");
   return result;
 };
 
@@ -318,39 +331,39 @@ const provenanceFor = (sqlite, config, knowledgeBaseId, pages) => {
   return result;
 };
 
-const pageContextItem = (sqlite, result, budget, tokens, type = "wiki_page") => {
+const pageContextItem = (sqlite, result, budget, tokens, type = "wiki_page", tokenizer = null) => {
   const page = result.page || {};
   const content = result._contentMarkdown ?? pageFromId(sqlite, result.pageId)?.content_markdown ?? "";
   const heading = `### Wiki · ${page.title || result.title || result.pageId}`;
   const full = `${heading}\n${content}`.trim();
-  if (estimateTokens(full) <= budget) return { id: result.pageId, type, channel: "wiki", pageId: result.pageId, pageVersionId: result.pageVersionId, title: page.title || result.title, locator: result.locator, graphPath: result.graphPath || null, text: full, estimatedTokens: estimateTokens(full), truncated: false };
+  if (countBudgetTokens(full, tokenizer) <= budget) return { id: result.pageId, type, channel: "wiki", pageId: result.pageId, pageVersionId: result.pageVersionId, title: page.title || result.title, locator: result.locator, graphPath: result.graphPath || null, text: full, estimatedTokens: countBudgetTokens(full, tokenizer), truncated: false };
   const pageRow = pageFromId(sqlite, result.pageId);
   const blocks = pageRow?.current_version_id ? blocksFor(sqlite, pageRow.current_version_id) : [];
   const matching = blocks.filter((block) => scoreDocument({ title: "", content: block.content_markdown, tokens }).matchedFeatures.matchedTerms.length).map((block) => block.ordinal);
   const indexes = new Set();
   for (const ordinal of (matching.length ? matching : [0])) for (const index of [ordinal - 1, ordinal, ordinal + 1]) if (index >= 0 && index < blocks.length) indexes.add(index);
   const excerpt = [...indexes].sort((left, right) => left - right).map((index) => blocks[index].content_markdown).join("\n\n") || content;
-  const fitted = truncateToTokens(`${heading}\n${excerpt}`, budget);
-  return { id: result.pageId, type, channel: "wiki", pageId: result.pageId, pageVersionId: result.pageVersionId, title: page.title || result.title, locator: result.locator, graphPath: result.graphPath || null, text: fitted, estimatedTokens: estimateTokens(fitted), truncated: true };
+  const fitted = truncateToTokens(`${heading}\n${excerpt}`, budget, tokenizer);
+  return { id: result.pageId, type, channel: "wiki", pageId: result.pageId, pageVersionId: result.pageVersionId, title: page.title || result.title, locator: result.locator, graphPath: result.graphPath || null, text: fitted, estimatedTokens: countBudgetTokens(fitted, tokenizer), truncated: true };
 };
 
-const rawContextItem = (result, budget) => {
+const rawContextItem = (result, budget, tokenizer = null) => {
   const heading = `### Raw · ${result.resource?.name || result.resourceId}`;
   const contextHeader = result.contextHeader || "";
   const child = result.content || "";
   const parent = result.parentContext || "";
   const full = `${heading}\n${contextHeader ? `Context header:\n${contextHeader}\n\n` : ""}${parent ? `Parent context:\n${parent}\n\n` : ""}Child chunk:\n${child}`.trim();
-  if (estimateTokens(full) <= budget) return { id: result.chunkId, type: "raw_chunk", channel: "raw", chunkId: result.chunkId, resourceId: result.resourceId, resourceVersionId: result.resourceVersionId, title: result.resource?.name, locator: result.locator, text: full, estimatedTokens: estimateTokens(full), truncated: false };
-  const headingTokens = estimateTokens(`${heading}\n${contextHeader ? `Context header:\n${contextHeader}\n` : ""}Child chunk:\n`);
-  const childFitted = truncateToTokens(child, Math.max(1, budget - headingTokens));
+  if (countBudgetTokens(full, tokenizer) <= budget) return { id: result.chunkId, type: "raw_chunk", channel: "raw", chunkId: result.chunkId, resourceId: result.resourceId, resourceVersionId: result.resourceVersionId, title: result.resource?.name, locator: result.locator, text: full, estimatedTokens: countBudgetTokens(full, tokenizer), truncated: false };
+  const headingTokens = countBudgetTokens(`${heading}\n${contextHeader ? `Context header:\n${contextHeader}\n` : ""}Child chunk:\n`, tokenizer);
+  const childFitted = truncateToTokens(child, Math.max(1, budget - headingTokens), tokenizer);
   let text = `${heading}\n${contextHeader ? `Context header:\n${contextHeader}\n` : ""}Child chunk:\n${childFitted}`;
-  const remaining = budget - estimateTokens(text) - estimateTokens("\n\nParent context:\n");
-  if (parent && remaining > 0) text += `\n\nParent context:\n${truncateToTokens(parent, remaining)}`;
-  text = truncateToTokens(text, budget);
-  return { id: result.chunkId, type: "raw_chunk", channel: "raw", chunkId: result.chunkId, resourceId: result.resourceId, resourceVersionId: result.resourceVersionId, title: result.resource?.name, locator: result.locator, text, estimatedTokens: estimateTokens(text), truncated: true };
+  const remaining = budget - countBudgetTokens(text, tokenizer) - countBudgetTokens("\n\nParent context:\n", tokenizer);
+  if (parent && remaining > 0) text += `\n\nParent context:\n${truncateToTokens(parent, remaining, tokenizer)}`;
+  text = truncateToTokens(text, budget, tokenizer);
+  return { id: result.chunkId, type: "raw_chunk", channel: "raw", chunkId: result.chunkId, resourceId: result.resourceId, resourceVersionId: result.resourceVersionId, title: result.resource?.name, locator: result.locator, text, estimatedTokens: countBudgetTokens(text, tokenizer), truncated: true };
 };
 
-export const assembleContext = (sqlite, { wikiResults, graphResults, rawResults, contextBudgetTokens, query, provenance = [] }) => {
+export const assembleContext = (sqlite, { wikiResults, graphResults, rawResults, contextBudgetTokens, query, provenance = [], tokenizer = null }) => {
   const wikiBudgetTokens = Math.floor(contextBudgetTokens * RETRIEVAL_DEFAULTS.wikiBudgetRatio);
   const rawBudgetTokens = contextBudgetTokens - wikiBudgetTokens;
   const wikiItems = [];
@@ -359,9 +372,9 @@ export const assembleContext = (sqlite, { wikiResults, graphResults, rawResults,
   let wikiRemaining = wikiBudgetTokens;
   for (const result of [...wikiResults, ...graphResults]) {
     if (wikiItems.some((item) => item.pageId === result.pageId)) continue;
-    const separatorTokens = wikiItems.length || rawItems.length ? estimateTokens("\n\n") : 0;
+    const separatorTokens = wikiItems.length || rawItems.length ? countBudgetTokens("\n\n", tokenizer) : 0;
     if (wikiRemaining <= separatorTokens) { truncatedItems.push({ channel: "wiki", id: result.pageId, reason: "budget_exhausted" }); continue; }
-    const item = { ...pageContextItem(sqlite, result, wikiRemaining - separatorTokens, tokenizeQuery(query), result._source === "wiki-graph" ? "wiki_graph_page" : "wiki_page"), provenance: provenance.filter((entry) => entry.pageId === result.pageId) };
+    const item = { ...pageContextItem(sqlite, result, wikiRemaining - separatorTokens, tokenizeQuery(query), result._source === "wiki-graph" ? "wiki_graph_page" : "wiki_page", tokenizer), provenance: provenance.filter((entry) => entry.pageId === result.pageId) };
     if (!item.text) { truncatedItems.push({ channel: "wiki", id: result.pageId, reason: "budget_exhausted" }); continue; }
     wikiItems.push(item);
     wikiRemaining -= separatorTokens + item.estimatedTokens;
@@ -369,9 +382,9 @@ export const assembleContext = (sqlite, { wikiResults, graphResults, rawResults,
   }
   let rawRemaining = rawBudgetTokens;
   for (const result of rawResults) {
-    const separatorTokens = wikiItems.length || rawItems.length ? estimateTokens("\n\n") : 0;
+    const separatorTokens = wikiItems.length || rawItems.length ? countBudgetTokens("\n\n", tokenizer) : 0;
     if (rawRemaining <= separatorTokens) { truncatedItems.push({ channel: "raw", id: result.chunkId, reason: "budget_exhausted" }); continue; }
-    const item = { ...rawContextItem(result, rawRemaining - separatorTokens), provenance: [{ via: "raw", resourceId: result.resourceId, resourceVersionId: result.resourceVersionId, processingRunId: result.processingRunId, locator: result.locator }] };
+    const item = { ...rawContextItem(result, rawRemaining - separatorTokens, tokenizer), provenance: [{ via: "raw", resourceId: result.resourceId, resourceVersionId: result.resourceVersionId, processingRunId: result.processingRunId, locator: result.locator }] };
     if (!item.text) { truncatedItems.push({ channel: "raw", id: result.chunkId, reason: "budget_exhausted" }); continue; }
     rawItems.push(item);
     rawRemaining -= separatorTokens + item.estimatedTokens;
@@ -379,7 +392,7 @@ export const assembleContext = (sqlite, { wikiResults, graphResults, rawResults,
   }
   const items = [...wikiItems, ...rawItems];
   const markdown = items.map((item) => item.text).join("\n\n");
-  return { items, markdown, estimatedTokens: estimateTokens(markdown), wikiBudgetTokens, rawBudgetTokens, wikiEstimatedTokens: wikiBudgetTokens - wikiRemaining, rawEstimatedTokens: rawBudgetTokens - rawRemaining, truncated: truncatedItems.length > 0, truncatedItems, query };
+  return { items, markdown, estimatedTokens: countBudgetTokens(markdown, tokenizer), tokenizer: tokenizer?.name || null, wikiBudgetTokens, rawBudgetTokens, wikiEstimatedTokens: wikiBudgetTokens - wikiRemaining, rawEstimatedTokens: rawBudgetTokens - rawRemaining, truncated: truncatedItems.length > 0, truncatedItems, query };
 };
 
 const applySeedGates = (results) => results.map((result, index) => {
@@ -450,7 +463,8 @@ export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => 
   if (request.spaceId && !sqlite.prepare("SELECT id FROM spaces WHERE id=? AND knowledge_base_id=? AND status='active'").get(request.spaceId, request.knowledgeBaseId)) throw fail("Space not found", "NOT_FOUND");
   const traceId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
-  const trace = { traceId, query: request.query, scope: { knowledgeBaseId: request.knowledgeBaseId, spaceId: request.spaceId, rawScope: "knowledge_base" }, limits: { wikiTopK: request.wikiTopK, rawTopK: request.rawTopK, contextBudgetTokens: request.contextBudgetTokens }, vector: { enabled: config.retrievalVectorEnabled !== false, provider: String(config.embeddingProvider || "mock"), model: String(config.embeddingModel || "mock-hash-v1"), status: config.retrievalVectorEnabled === false ? "disabled" : "pending", keywordFallback: true, durationMs: 0, error: null }, wiki: { seeds: [], graphExpanded: [] }, raw: { results: [] }, provenance: [], context: { items: [], markdown: "", estimatedTokens: 0, truncated: false, wikiBudgetTokens: Math.floor(request.contextBudgetTokens * 0.6), rawBudgetTokens: request.contextBudgetTokens - Math.floor(request.contextBudgetTokens * 0.6), wikiEstimatedTokens: 0, rawEstimatedTokens: 0, truncatedItems: [] }, metrics: { startedAt }, status: "succeeded", error: null };
+  let embeddingProvider = null;
+  const trace = { traceId, query: request.query, scope: { knowledgeBaseId: request.knowledgeBaseId, spaceId: request.spaceId, rawScope: "knowledge_base" }, limits: { wikiTopK: request.wikiTopK, rawTopK: request.rawTopK, contextBudgetTokens: request.contextBudgetTokens }, vector: { enabled: config.retrievalVectorEnabled !== false, provider: String(config.embeddingProvider || "mock"), model: String(config.embeddingModel || "mock-hash-v1"), status: config.retrievalVectorEnabled === false ? "disabled" : "pending", keywordFallback: true, durationMs: 0, error: null, tokenizer: null }, wiki: { seeds: [], graphExpanded: [] }, raw: { results: [] }, provenance: [], context: { items: [], markdown: "", estimatedTokens: 0, truncated: false, tokenizer: null, wikiBudgetTokens: Math.floor(request.contextBudgetTokens * 0.6), rawBudgetTokens: request.contextBudgetTokens - Math.floor(request.contextBudgetTokens * 0.6), wikiEstimatedTokens: 0, rawEstimatedTokens: 0, truncatedItems: [] }, metrics: { startedAt }, status: "succeeded", error: null };
   try {
     assertRetrievalIndexes(sqlite);
     const tokens = tokenizeQuery(request.query);
@@ -468,19 +482,21 @@ export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => 
     if (trace.vector.enabled) {
       const providerStart = Date.now();
       try {
-        const provider = createEmbeddingProvider(config);
-        const queryEmbedding = await provider.embedText(request.query);
-        trace.vector.provider = provider.provider;
-        trace.vector.model = provider.model;
-        trace.vector.dimensions = provider.dimensions;
-        trace.vector.requestedDimensions = queryEmbedding.requestedDimensions ?? provider.dimensions;
-        const vectorProvider = { ...provider, dimensions: queryEmbedding.dimensions };
+        embeddingProvider = createEmbeddingProvider(config);
+        trace.vector.provider = embeddingProvider.provider;
+        trace.vector.model = embeddingProvider.model;
+        trace.vector.dimensions = embeddingProvider.dimensions;
+        trace.vector.tokenizer = embeddingProvider.tokenizer?.name || null;
+        const queryEmbedding = await embeddingProvider.embedText(request.query);
+        trace.vector.requestedDimensions = queryEmbedding.requestedDimensions ?? embeddingProvider.dimensions;
+        const vectorProvider = { ...embeddingProvider, dimensions: queryEmbedding.dimensions };
         trace.vector.dimensions = queryEmbedding.dimensions;
         wikiVector = vectorSearch(vectorRowsForWiki(sqlite, request.knowledgeBaseId, request.spaceId, vectorProvider), (row, score) => pageResult(sqlite, row, tokens, score), queryEmbedding.vector);
         rawVector = vectorSearch(vectorRowsForRaw(sqlite, request.knowledgeBaseId, vectorProvider), (row, score) => rawResult(sqlite, row, tokens, score), queryEmbedding.vector);
         trace.vector.status = wikiVector.length || rawVector.length ? "used" : "no_embeddings";
         trace.vector.keywordFallback = false;
       } catch (caught) {
+        if (caught?.code === "EMBEDDING_EGRESS_BLOCKED") throw caught;
         trace.vector.status = caught.code === "EMBEDDING_DISABLED" ? "disabled" : "degraded";
         trace.vector.error = { code: caught.code || "EMBEDDING_FAILED", message: caught.message || "embedding provider failed" };
       }
@@ -500,7 +516,7 @@ export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => 
     trace.provenance = provenanceFor(sqlite, config, request.knowledgeBaseId, [...gatedSeeds, ...graph]);
     trace.metrics.provenanceMs = Date.now() - stage;
     stage = Date.now();
-    trace.context = assembleContext(sqlite, { wikiResults: gatedSeeds, graphResults: graph, rawResults: mergedRaw, contextBudgetTokens: request.contextBudgetTokens, query: request.query, provenance: trace.provenance });
+    trace.context = assembleContext(sqlite, { wikiResults: gatedSeeds, graphResults: graph, rawResults: mergedRaw, contextBudgetTokens: request.contextBudgetTokens, query: request.query, provenance: trace.provenance, tokenizer: embeddingProvider?.tokenizer || null });
     trace.metrics.contextMs = Date.now() - stage;
     trace.metrics.completedAt = new Date().toISOString();
     trace.metrics.durationMs = Date.now() - Date.parse(startedAt);
@@ -571,7 +587,6 @@ export const rebuildRetrievalIndexes = (sqlite) => {
   return sqlite.transaction(() => {
     sqlite.prepare("DELETE FROM wiki_fts").run();
     sqlite.prepare("DELETE FROM wiki_link_edges").run();
-    sqlite.prepare("DELETE FROM retrieval_embeddings").run();
     sqlite.prepare("DELETE FROM resource_fts").run();
     const rawInsert = sqlite.prepare("INSERT INTO resource_fts (chunk_id,content,title) VALUES (?,?,?)");
     const rawRows = sqlite.prepare(`SELECT c.id,c.content,c.context_header,rv.title FROM chunks c JOIN resource_versions rv ON rv.id=c.resource_version_id JOIN resources r ON r.id=rv.resource_id JOIN processing_runs pr ON pr.id=c.processing_run_id WHERE c.chunk_type='text' AND c.status='active' AND r.status<>'archived' AND r.current_version_id=rv.id AND rv.status='indexed' AND rv.active_processing_run_id=c.processing_run_id AND pr.status='indexed'`).all();
@@ -584,8 +599,9 @@ export const rebuildRetrievalIndexes = (sqlite) => {
       if (projection.indexed) wikiCount += 1;
       edgeCount += projection.edges;
     }
-    if (tableExists(sqlite, "schema_meta")) sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint5-agent-tree-derived-ready',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(new Date().toISOString());
-    return { rawRows: rawRows.length, wikiRows: wikiCount, linkEdges: edgeCount, embeddings: 0 };
+    if (tableExists(sqlite, "schema_meta")) sqlite.prepare("INSERT INTO schema_meta (key,value,updated_at) VALUES ('derived_schema','sprint6-personal-derived-ready',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(new Date().toISOString());
+    const embeddings = sqlite.prepare("SELECT count(*) AS count FROM retrieval_embeddings WHERE status='ready'").get()?.count || 0;
+    return { rawRows: rawRows.length, wikiRows: wikiCount, linkEdges: edgeCount, embeddings };
   })();
 };
 
@@ -624,12 +640,14 @@ export const queueEmbeddingTask = (sqlite, { ownerType, ownerId, pageVersionId =
   return taskPayload(sqlite, id);
 };
 
-export const ensurePendingEmbeddingTasks = (sqlite, reason = "startup") => {
+export const ensurePendingEmbeddingTasks = (sqlite, reason = "startup", config = null) => {
   let queued = 0;
   const activeTaskCache = createEmbeddingTaskCache(sqlite);
   const queueIfMissing = (input) => {
     const versionKey = input.pageVersionId || input.resourceVersionId;
-    const existing = sqlite.prepare("SELECT id FROM retrieval_embeddings WHERE owner_type=? AND owner_id=? AND version_key=? AND status='ready' LIMIT 1").get(input.ownerType, input.ownerId, versionKey);
+    const existing = config
+      ? sqlite.prepare("SELECT id FROM retrieval_embeddings WHERE owner_type=? AND owner_id=? AND version_key=? AND provider=? AND model=? AND dimensions=? AND status='ready' LIMIT 1").get(input.ownerType, input.ownerId, versionKey, config.embeddingProvider || "mock", config.embeddingModel || "mock-hash-v1", Number(config.embeddingDimensions || 32))
+      : sqlite.prepare("SELECT id FROM retrieval_embeddings WHERE owner_type=? AND owner_id=? AND version_key=? AND status='ready' LIMIT 1").get(input.ownerType, input.ownerId, versionKey);
     if (existing) return;
     const before = activeTaskCache.size;
     queueEmbeddingTask(sqlite, { ...input, activeTaskCache });
@@ -640,10 +658,10 @@ export const ensurePendingEmbeddingTasks = (sqlite, reason = "startup") => {
   return queued;
 };
 
-export const persistEmbedding = (sqlite, { ownerType, ownerId, pageVersionId = null, resourceVersionId = null, processingRunId = null, provider, model, vector = null, errorCode = null, errorSummary = null }) => {
+export const persistEmbedding = (sqlite, { ownerType, ownerId, pageVersionId = null, resourceVersionId = null, processingRunId = null, provider, model, inputSha256 = null, vector = null, errorCode = null, errorSummary = null }) => {
   const versionKey = pageVersionId || resourceVersionId;
   const status = vector ? "ready" : "failed";
-  const values = { id: crypto.randomUUID(), ownerType, ownerId, versionKey, pageVersionId, resourceVersionId, processingRunId, provider: provider || "unknown", model: model || "unknown", dimensions: vector?.length || 0, vectorJson: vector ? JSON.stringify(vector) : null, status, errorSummary: errorSummary ? `${errorCode ? `${errorCode}: ` : ""}${String(errorSummary).slice(0, 500)}` : null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  sqlite.prepare(`INSERT INTO retrieval_embeddings (id,owner_type,owner_id,version_key,page_version_id,resource_version_id,processing_run_id,provider,model,dimensions,vector_json,status,error_summary,created_at,updated_at) VALUES (@id,@ownerType,@ownerId,@versionKey,@pageVersionId,@resourceVersionId,@processingRunId,@provider,@model,@dimensions,@vectorJson,@status,@errorSummary,@createdAt,@updatedAt) ON CONFLICT(owner_type,owner_id,version_key,provider,model) DO UPDATE SET dimensions=excluded.dimensions,vector_json=excluded.vector_json,status=excluded.status,error_summary=excluded.error_summary,updated_at=excluded.updated_at`).run(values);
+  const values = { id: crypto.randomUUID(), ownerType, ownerId, versionKey, pageVersionId, resourceVersionId, processingRunId, provider: provider || "unknown", model: model || "unknown", dimensions: vector?.length || 0, inputSha256, vectorJson: vector ? JSON.stringify(vector) : null, status, errorSummary: errorSummary ? `${errorCode ? `${errorCode}: ` : ""}${String(errorSummary).slice(0, 500)}` : null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  sqlite.prepare(`INSERT INTO retrieval_embeddings (id,owner_type,owner_id,version_key,page_version_id,resource_version_id,processing_run_id,provider,model,dimensions,input_sha256,vector_json,status,error_summary,created_at,updated_at) VALUES (@id,@ownerType,@ownerId,@versionKey,@pageVersionId,@resourceVersionId,@processingRunId,@provider,@model,@dimensions,@inputSha256,@vectorJson,@status,@errorSummary,@createdAt,@updatedAt) ON CONFLICT(owner_type,owner_id,version_key,provider,model) DO UPDATE SET input_sha256=CASE WHEN excluded.status='ready' THEN excluded.input_sha256 ELSE retrieval_embeddings.input_sha256 END,dimensions=CASE WHEN excluded.status='ready' THEN excluded.dimensions ELSE retrieval_embeddings.dimensions END,vector_json=CASE WHEN excluded.status='ready' THEN excluded.vector_json ELSE retrieval_embeddings.vector_json END,status=CASE WHEN excluded.status='ready' THEN excluded.status ELSE retrieval_embeddings.status END,error_summary=excluded.error_summary,updated_at=excluded.updated_at`).run(values);
   return sqlite.prepare("SELECT * FROM retrieval_embeddings WHERE owner_type=? AND owner_id=? AND version_key=? AND provider=? AND model=?").get(ownerType, ownerId, versionKey, values.provider, values.model);
 };

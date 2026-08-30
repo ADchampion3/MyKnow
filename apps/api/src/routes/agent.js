@@ -97,6 +97,7 @@ export const handleAgentRoutes = ({ ctx, request }) => {
   const { sqlite } = ctx;
 
   if (pathname === "/api/agent/runs" && method === "POST") {
+    ctx.assertModelEgress();
     const kind = body?.kind || body?.runKind || "organize";
     if (!["answer", "organize"].includes(kind)) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "kind must be answer or organize"), requestId); return true; }
     const prompt = normalizePrompt(body?.prompt);
@@ -185,6 +186,7 @@ export const handleAgentRoutes = ({ ctx, request }) => {
   }
   const messageMatch = pathname.match(/^\/api\/chat\/sessions\/([^/]+)\/messages$/);
   if (messageMatch && method === "POST") {
+    ctx.assertModelEgress();
     const session = sqlite.prepare("SELECT * FROM chat_sessions WHERE id=? AND status='active'").get(messageMatch[1]);
     if (!session) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Active chat session not found"), requestId); return true; }
     const content = normalizePrompt(body?.content ?? body?.prompt);

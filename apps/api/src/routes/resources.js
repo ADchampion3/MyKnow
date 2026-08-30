@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chunkDocument, contentStorageKey, externalWikiMode, mimeForExtension, normalizeCanonicalText, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
+import { chunkDocument, codePointLength, contentStorageKey, externalWikiMode, mimeForExtension, normalizeCanonicalText, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
 
 const textMimes = new Set(["text/plain", "text/markdown"]);
 const resourceStatuses = new Set(["pending", "processing", "indexed", "degraded", "failed", "archived"]);
@@ -25,6 +25,14 @@ const ocrRequestFor = (body, isPdf, stored = null) => {
     ocrProvider: requestField(body, "ocrProvider", "ocr_provider", "provider"),
     ocrCapabilities: parseOcrCapabilities(requestField(body, "ocrCapabilities", "ocr_capabilities", "capabilities"))
   }, { isPdf });
+};
+const refreshOcrFor = (body, isPdf) => {
+  const value = requestField(body, "refreshOcr", "refresh_ocr");
+  if (value === undefined || value === null || value === "") return false;
+  const refresh = typeof value === "boolean" ? value : typeof value === "string" && ["true", "1", "yes", "on"].includes(value.trim().toLowerCase()) ? true : typeof value === "string" && ["false", "0", "no", "off"].includes(value.trim().toLowerCase()) ? false : null;
+  if (refresh === null) throw fail("refreshOcr must be true or false");
+  if (refresh && !isPdf) throw fail("refreshOcr is supported only for PDF resources", "OCR_UNSUPPORTED_MEDIA");
+  return refresh;
 };
 const readVerified = (root, key, expectedSize, expectedSha, label) => {
   let bytes;
@@ -90,13 +98,15 @@ const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId
   if (!input.bytes.length || input.bytes.length > config.resourceMaxBytes) throw fail("source size is invalid");
   if (existing && existing.source_type !== input.sourceType) throw fail("a resource cannot change source type", "INVALID_STATE_TRANSITION");
   const processingRequest = ocrRequestFor(body, input.mimeType === "application/pdf");
+  ctx.assertOcrEgress(processingRequest);
+  const refreshOcr = refreshOcrFor(body, input.mimeType === "application/pdf");
   let initialWikiMode = null;
   if (!existing && (body?.wikiMode !== undefined || body?.wiki_mode !== undefined)) {
     try { initialWikiMode = normalizeWikiMode(body.wikiMode ?? body.wiki_mode, { nullable: true }); }
     catch (caught) { throw fail(caught.message); }
   }
   const fingerprint = sha256(input.bytes);
-  const requestFingerprint = sha256(JSON.stringify({ resourceId: existing?.id || null, kbId, name, sourceType: input.sourceType, mimeType: input.mimeType, originalFilename: input.originalFilename, contentSha256: fingerprint, processingRequest }));
+  const requestFingerprint = sha256(JSON.stringify({ resourceId: existing?.id || null, kbId, name, sourceType: input.sourceType, mimeType: input.mimeType, originalFilename: input.originalFilename, contentSha256: fingerprint, processingRequest, refreshOcr }));
   if (idempotencyKey) {
     if (idempotencyKey.length > 200) throw fail("Idempotency-Key is too long");
     const prior = sqlite.prepare("SELECT * FROM resource_versions WHERE idempotency_key=?").get(idempotencyKey);
@@ -115,7 +125,7 @@ const importResource = async (ctx, { body, requestId, idempotencyKey, resourceId
     if (!existing) sqlite.prepare("INSERT INTO resources (id,name,source_type,wiki_mode,status,current_version_id,created_at,updated_at) VALUES (?,?,?,?,'pending',NULL,?,?)").run(targetResourceId, name, input.sourceType, initialWikiMode, timestamp, timestamp);
     sqlite.prepare("INSERT INTO resource_versions (id,resource_id,content_sha256,storage_key,mime_type,byte_size,original_filename,chunking_config,ocr_mode,ocr_provider,ocr_capabilities,status,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)").run(versionId, targetResourceId, fingerprint, storageKey, input.mimeType, input.bytes.length, input.originalFilename, JSON.stringify(chunkingFor(sqlite, targetResourceId, kbId)), processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), idempotencyKey, requestFingerprint, timestamp, timestamp);
     if (!existing) sqlite.prepare("INSERT INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(targetResourceId, kbId, timestamp);
-    task = ctx.queueVersion(versionId, requestId, existing ? "new-version" : "import");
+    task = ctx.queueVersion(versionId, requestId, existing ? "new-version" : "import", refreshOcr ? { refreshOcr: true } : null);
     ctx.audit("imported", "resource_version", versionId, requestId, { resourceId: targetResourceId, sourceType: input.sourceType });
   })();
   return { status: 201, data: { resource: resourcePayload(ctx, ctx.resource(targetResourceId)), version: versionPayload(ctx, ctx.version(versionId)), task: ctx.taskView(task), idempotent: false } };
@@ -148,6 +158,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     let queued = 0;
     sqlite.transaction(() => {
       for (const version of sqlite.prepare("SELECT rv.* FROM resource_versions rv JOIN resources r ON r.id=rv.resource_id WHERE r.status <> 'archived' ORDER BY rv.created_at,rv.id").all()) {
+        ctx.assertOcrEgress(processingRequestFromVersion(version, { isPdf: version.mime_type === "application/pdf" }));
         const active = sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(version.id);
         sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'pending' ELSE 'indexed' END,error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, version.id);
         if (!active) { ctx.queueVersion(version.id, requestId, "explicit-full-rebuild"); queued += 1; }
@@ -265,11 +276,11 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   const previewMatch = pathname.match(/^\/api\/resources\/([^/]+)\/chunk-preview$/);
   if (previewMatch && method === "POST") {
     if (!ctx.resource(previewMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    if (typeof body?.text !== "string" || !body.text.trim() || body.text.length > 64 * 1024) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "text must be 1-65536 characters"), requestId); return true; }
+    if (typeof body?.text !== "string" || !body.text.trim() || codePointLength(body.text) > 64 * 1024) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "text must be 1-65536 Unicode code points"), requestId); return true; }
     try {
       const document = chunkDocument(body.text, normalizeChunkingConfig(body?.chunkingConfig ?? {}));
       if (document.totalChunks > 500) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "preview produces too many chunks"), requestId); return true; }
-      ctx.json(res, 200, { strategy: document.strategy, profile: document.profile, config: document.config, blocks: document.blocks, parents: document.parents, children: document.children, diagnostics: { totalChunks: document.totalChunks, parentCount: document.parents.length, childCount: document.children.length } }, null, requestId);
+      ctx.json(res, 200, { strategy: document.strategy, profile: document.profile, config: document.config, blocks: document.blocks, parents: document.parents, children: document.children, diagnostics: { ...document.diagnostics, totalChunks: document.totalChunks } }, null, requestId);
     } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
@@ -284,8 +295,13 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     let processingRequest;
     try { processingRequest = ocrRequestFor(body, target.mime_type === "application/pdf", target); }
     catch (caught) { ctx.json(res, 400, null, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
+    try { ctx.assertOcrEgress(processingRequest); }
+    catch (caught) { ctx.json(res, 403, null, ctx.error(caught.code || "OCR_EGRESS_BLOCKED", caught.message), requestId); return true; }
+    let refreshOcr;
+    try { refreshOcr = refreshOcrFor(body, target.mime_type === "application/pdf"); }
+    catch (caught) { ctx.json(res, 400, null, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
     if (idempotencyKey && idempotencyKey.length > 200) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "Idempotency-Key is too long"), requestId); return true; }
-    const processingFingerprint = sha256(JSON.stringify({ versionId: target.id, processingRequest, chunkingConfig: body?.chunkingConfig ?? null }));
+    const processingFingerprint = sha256(JSON.stringify({ versionId: target.id, processingRequest, refreshOcr, chunkingConfig: body?.chunkingConfig ?? null }));
     if (idempotencyKey) {
       const priorTasks = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? ORDER BY created_at DESC,id DESC").all(target.id);
       for (const prior of priorTasks) {
@@ -311,7 +327,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     sqlite.transaction(() => {
       sqlite.prepare("UPDATE resource_versions SET status=CASE WHEN active_processing_run_id IS NULL THEN 'pending' ELSE 'indexed' END,chunking_config=COALESCE(?,chunking_config),ocr_mode=?,ocr_provider=?,ocr_capabilities=?,error_summary=NULL,updated_at=? WHERE id=?").run(chunkingConfig, processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), timestamp, target.id);
       refreshResourceStatus(sqlite, found.id, timestamp);
-      task = ctx.queueVersion(target.id, requestId, "reprocess", idempotencyKey ? { idempotencyKey, requestFingerprint: processingFingerprint } : null);
+      task = ctx.queueVersion(target.id, requestId, "reprocess", { ...(idempotencyKey ? { idempotencyKey, requestFingerprint: processingFingerprint } : {}), ...(refreshOcr ? { refreshOcr: true } : {}) });
       ctx.audit("reprocess_requested", "resource_version", target.id, requestId, { taskId: task.id });
     })();
     ctx.json(res, 202, ctx.taskView(task), null, requestId);
@@ -385,7 +401,10 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     if (found.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be retried"), requestId); return true; }
     const target = body?.versionId ? ctx.version(body.versionId) : sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? AND status='failed' ORDER BY created_at DESC,id DESC LIMIT 1").get(found.id);
     if (!target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Failed resource version not found"), requestId); return true; }
-    if (target.status !== "failed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed resource versions can be retried"), requestId); return true; }
+    const failedProcessingRun = sqlite.prepare("SELECT id FROM processing_runs WHERE resource_version_id=? AND status='failed' ORDER BY created_at DESC,id DESC LIMIT 1").get(target.id);
+    if (target.status !== "failed" && !failedProcessingRun) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed resource versions or processing runs can be retried"), requestId); return true; }
+    try { ctx.assertOcrEgress(processingRequestFromVersion(target, { isPdf: target.mime_type === "application/pdf" })); }
+    catch (caught) { ctx.json(res, 403, null, ctx.error(caught.code || "OCR_EGRESS_BLOCKED", caught.message), requestId); return true; }
     if (sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(target.id)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Resource version is already being processed"), requestId); return true; }
     let task;
     const timestamp = ctx.now();

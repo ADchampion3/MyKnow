@@ -39,7 +39,7 @@ export const rebuildDatabase = ({ target, resourceStorageDir = path.resolve("dat
   if (path.extname(database).toLowerCase() !== ".db" || !fs.existsSync(database) || !fs.statSync(database).isFile()) throw new Error("database-file must be an existing .db file");
   const sourceCopy = `${database}.rebuild-source-${process.pid}-${Date.now()}.db`;
   const rebuilt = `${database}.rebuild-target-${process.pid}-${Date.now()}.db`;
-  const backup = `${database}.pre-sprint5-${Date.now()}.bak`;
+  const backup = `${database}.pre-rebuild-${Date.now()}.bak`;
   let source;
   let destination;
   let originalMoved = false;

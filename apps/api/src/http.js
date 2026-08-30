@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { redactSecrets } from "@myknow/config";
 
 const errorStatus = new Map([
   ["VALIDATION_ERROR", 400],
@@ -34,6 +35,9 @@ const errorStatus = new Map([
   ["OCR_LIMIT_EXCEEDED", 422],
   ["OCR_PROVIDER_UNAVAILABLE", 422],
   ["OCR_FAILED", 422],
+  ["OCR_EGRESS_BLOCKED", 403],
+  ["OCR_CACHE_INVALID", 422],
+  ["OCR_CACHE_WRITE_FAILED", 500],
   ["PROCESSING_TIMEOUT", 422],
   ["RETRIEVAL_INDEX_UNAVAILABLE", 503],
   ["AGENT_SCOPE_INVALID", 400],
@@ -52,6 +56,9 @@ const errorStatus = new Map([
   ["EMBEDDING_PROVIDER_UNAVAILABLE", 422],
   ["EMBEDDING_TIMEOUT", 422],
   ["EMBEDDING_FAILED", 422],
+  ["EMBEDDING_EGRESS_BLOCKED", 403],
+  ["EMBEDDING_RESPONSE_INVALID", 422],
+  ["EMBEDDING_DIMENSION_MISMATCH", 422],
   ["SOURCE_INTEGRITY_FAILED", 500],
   ["DATABASE_RECREATE_REQUIRED", 500],
   ["INTERNAL_ERROR", 500]
@@ -66,7 +73,7 @@ export const createHttpTools = ({ config }) => {
       "access-control-allow-origin": allowedOrigin(res.req?.headers?.origin, config.webPort),
       "access-control-allow-headers": "content-type, idempotency-key"
     });
-    res.end(JSON.stringify({ data, error, requestId }));
+    res.end(JSON.stringify({ data, error: redactSecrets(error), requestId }));
   };
 
   const readRawBody = (req) => new Promise((resolve, reject) => {
@@ -145,7 +152,8 @@ export const createHttpTools = ({ config }) => {
   const respondCaught = (res, caught, requestId) => {
     const caughtCode = typeof caught?.code === "string" ? caught.code : "";
     const code = caughtCode.startsWith("SQLITE_CONSTRAINT_UNIQUE") ? "DUPLICATE_NAME" : errorStatus.has(caughtCode) ? caughtCode : "INTERNAL_ERROR";
-    const message = code === "INTERNAL_ERROR" ? "Internal server error" : caught?.message || code;
+    const providerFailure = /^(?:MODEL_|EMBEDDING_|OCR_PROVIDER_|OCR_CACHE_|PROVIDER_|TRANSIENT_)/u.test(code);
+    const message = code === "INTERNAL_ERROR" ? "Internal server error" : providerFailure ? `${code}: provider details redacted` : redactSecrets(caught?.message || code);
     return json(res, errorStatus.get(code), null, error(code, message), requestId);
   };
 

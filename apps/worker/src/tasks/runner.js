@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { redactSecrets } from "@myknow/config";
 import { now, refreshResourceStatus } from "@myknow/db";
 
 const transientCodes = new Set(["TRANSIENT_ERROR", "SQLITE_BUSY", "WORKER_INTERRUPTED", "PROCESSING_TIMEOUT"]);
@@ -98,8 +99,8 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
       else if (task.type !== "demo_success") throw Object.assign(new Error("Unsupported task type"), { code: "PERMANENT_ERROR" });
       finish(task, "succeeded");
     } catch (caught) {
-      const baseMessage = caught instanceof Error ? caught.message : "processing failed";
       const errorCode = typeof caught?.code === "string" ? caught.code : "PERMANENT_ERROR";
+      const baseMessage = caught instanceof Error ? redactSecrets(caught.message) : "processing failed";
       const message = `${errorCode}: ${baseMessage}`;
       const status = failTask(task, message, errorCode);
       console.error(`Task ${task.id} failed: ${message}`);

@@ -1,5 +1,8 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
-import { deriveCanonicalArtifact, normalizeCanonicalText, processingRequestFromVersion, readBytes, safeStoragePath, sha256 } from "@myknow/db";
+import { deriveCanonicalArtifact, normalizeCanonicalText, ocrCacheKey, processingRequestFromVersion, readBytes, safeStoragePath, sha256 } from "@myknow/db";
 import { DefaultOcrProviderRegistry, OcrProviderAdapter } from "./ocr/adapter.js";
 
 const parseFailure = (message, metadata = {}, code = "PARSE_FAILED") => Object.assign(new Error(message), { code, metadata });
@@ -85,7 +88,7 @@ const safeOcrMetadata = (metadata) => {
   return Object.fromEntries(allowed.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]).filter(([, value]) => typeof value !== "string" || !/api[_-]?key|secret|token/i.test(value)));
 };
 
-const ocrParsed = (result, adapter, request, started) => {
+const ocrParsed = (result, adapter, request, started, { cacheHit = false, providerCallCount = 1, cacheKey = null, sourceSha256 = null } = {}) => {
   const artifact = deriveCanonicalArtifact({ ...result, requestedCapabilities: request.capabilities });
   const parsedQuality = quality(artifact.canonicalText, "pdf", { ocr: true });
   const metadata = safeOcrMetadata({ ...adapter, ...(result.metadata || {}), durationMs: Date.now() - started });
@@ -99,9 +102,64 @@ const ocrParsed = (result, adapter, request, started) => {
     parserVersion: metadata.adapterVersion || adapter.adapterVersion || adapter.version,
     provider: request.provider,
     metadata: { ocr: { ...metadata, provider: request.provider, capabilities: artifact.capabilities, warnings: artifact.warnings } },
-    ocr: { capabilities: artifact.capabilities, warnings: artifact.warnings, pageCount: artifact.pages.length, adapter: metadata },
+    ocr: { capabilities: artifact.capabilities, warnings: artifact.warnings, pageCount: artifact.pages.length, adapter: metadata, cacheHit, providerCallCount, cacheKey, sourceSha256 },
     quality: { ...parsedQuality, pageCount: artifact.pages.length, warningCount: artifact.warnings.length }
   };
+};
+
+const cacheFailure = (message, metadata = {}) => parseFailure(message, metadata, "OCR_CACHE_INVALID");
+const cacheStorageKey = (key) => `ocr-cache/${key}.json`;
+const sameCapabilities = (left, right) => JSON.stringify({ text: Boolean(left?.text), table: Boolean(left?.table), formula: Boolean(left?.formula) }) === JSON.stringify({ text: Boolean(right?.text), table: Boolean(right?.table), formula: Boolean(right?.formula) });
+
+const readOcrCache = (config, version, request, descriptor, key) => {
+  let bytes;
+  try { bytes = readBytes(config.resourceStorageDir, cacheStorageKey(key)); }
+  catch (caught) { if (caught?.code === "ENOENT") return null; throw cacheFailure("OCR cache cannot be read", { cacheKey: key }); }
+  let envelope;
+  try { envelope = JSON.parse(bytes.toString("utf8")); }
+  catch { throw cacheFailure("OCR cache is not valid JSON", { cacheKey: key }); }
+  const expectedModelVersion = String(descriptor.modelVersion || descriptor.adapterVersion || "");
+  if (envelope?.schemaVersion !== 1 || envelope.cacheKey !== key || envelope.sourceSha256 !== version.content_sha256 || envelope.provider !== request.provider || envelope.modelVersion !== expectedModelVersion || !sameCapabilities(envelope.capabilities, request.capabilities) || !Array.isArray(envelope.pages)) throw cacheFailure("OCR cache identity does not match the requested source or provider", { cacheKey: key });
+  try {
+    const artifact = deriveCanonicalArtifact({ pages: envelope.pages, capabilities: envelope.capabilities, warnings: envelope.warnings, metadata: envelope.metadata, requestedCapabilities: request.capabilities });
+    if (typeof envelope.canonicalText !== "string" || artifact.canonicalText !== normalizeCanonicalText(envelope.canonicalText)) throw new Error("canonical text mismatch");
+  } catch (caught) {
+    if (caught?.code === "OCR_CACHE_INVALID") throw caught;
+    throw cacheFailure("OCR cache content failed validation", { cacheKey: key });
+  }
+  return { pages: envelope.pages, capabilities: envelope.capabilities, warnings: envelope.warnings, metadata: envelope.metadata };
+};
+
+const writeOcrCache = (config, version, request, descriptor, key, parsed) => {
+  const envelope = {
+    schemaVersion: 1,
+    cacheKey: key,
+    sourceSha256: version.content_sha256,
+    provider: request.provider,
+    modelVersion: String(descriptor.modelVersion || descriptor.adapterVersion || ""),
+    capabilities: request.capabilities,
+    canonicalText: parsed.canonicalText,
+    pages: parsed.pages,
+    warnings: parsed.ocr?.warnings || [],
+    metadata: safeOcrMetadata({ ...descriptor, ...(parsed.metadata?.ocr || {}) })
+  };
+  const bytes = Buffer.from(JSON.stringify(envelope));
+  const storageKey = cacheStorageKey(key);
+  try {
+    const target = safeStoragePath(config.resourceStorageDir, storageKey);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temporary = `${target}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, bytes, { flag: "wx" });
+      fs.renameSync(temporary, target);
+    } catch (caught) {
+      try { fs.rmSync(temporary, { force: true }); } catch {}
+      if (!fs.existsSync(target)) throw caught;
+      fs.writeFileSync(target, bytes);
+    }
+  } catch (caught) {
+    throw parseFailure("OCR cache could not be written", { cacheKey: key, cause: caught?.code || "write_failed" }, "OCR_CACHE_WRITE_FAILED");
+  }
 };
 
 const readText = (version, config) => nativeParsed(decodeUtf8(readStoredBytes(version, config)), "utf8", "1", "text");
@@ -124,8 +182,20 @@ export const createMaterialReader = (config) => {
         const adapter = providerRegistry.resolve(processingRequest.provider);
         if (!adapter) throw parseFailure(`OCR provider is unavailable: ${processingRequest.provider}`, {}, "OCR_PROVIDER_UNAVAILABLE");
         if (!(adapter instanceof OcrProviderAdapter)) throw parseFailure(`OCR adapter is invalid: ${processingRequest.provider}`, {}, "OCR_PROVIDER_UNAVAILABLE");
+        if (config.aiEgressMode === "local_only" && ["cloud", "paddleocr"].includes(processingRequest.provider)) throw parseFailure("OCR egress is blocked in local_only mode", {}, "OCR_EGRESS_BLOCKED");
+        const descriptor = adapter.descriptor();
+        const modelVersion = String(descriptor.modelVersion || descriptor.adapterVersion || "");
+        const cacheKey = ocrCacheKey({ sourceSha256: version.content_sha256, provider: processingRequest.provider, modelVersion, capabilities: processingRequest.capabilities });
         candidates.push({ name: adapter.name, version: adapter.version, kind: "ocr", read: async () => {
           const started = Date.now();
+          if (hooks.refreshOcr !== true) {
+            const cached = readOcrCache(config, version, processingRequest, descriptor, cacheKey);
+            if (cached) {
+              readStoredBytes(version, config);
+              return ocrParsed(cached, descriptor, processingRequest, started, { cacheHit: true, providerCallCount: 0, cacheKey, sourceSha256: version.content_sha256 });
+            }
+            if (version.active_processing_run_id) throw cacheFailure("OCR cache is missing for an indexed PDF", { cacheKey });
+          }
           const result = await adapter.process({
             sourcePath: safeStoragePath(config.resourceStorageDir, version.storage_key),
             source: { mimeType: version.mime_type, filename: version.original_filename, byteSize: version.byte_size, sha256: version.content_sha256 },
@@ -136,7 +206,9 @@ export const createMaterialReader = (config) => {
             signal: hooks.signal,
             onPageProgress: (page, total) => hooks.progress?.({ page, total, progress: Math.min(99, Math.round((page / Math.max(1, total)) * 100)) })
           });
-          return ocrParsed(result, adapter.descriptor(), processingRequest, started);
+          const parsed = ocrParsed(result, descriptor, processingRequest, started, { cacheHit: false, providerCallCount: 1, cacheKey, sourceSha256: version.content_sha256 });
+          writeOcrCache(config, version, processingRequest, descriptor, cacheKey, parsed);
+          return parsed;
         } });
       }
       if (!isPdf || processingRequest.mode !== "force") {
@@ -158,7 +230,7 @@ export const createMaterialReader = (config) => {
         } catch (caught) {
           lastError = caught;
           if (hooks.failure) await hooks.failure(attempt, caught);
-          if (isCancelled(caught, hooks.signal)) throw caught;
+          if (isCancelled(caught, hooks.signal) || ["OCR_CACHE_INVALID", "OCR_CACHE_WRITE_FAILED", "OCR_EGRESS_BLOCKED"].includes(caught?.code) || hooks.refreshOcr === true) throw caught;
         }
       }
       throw lastError || parseFailure("no material reader succeeded");

@@ -3,7 +3,7 @@ import { chunkDocument, createEmbeddingTaskCache, normalizeChunkingConfig, now, 
 
 const archivedError = () => Object.assign(new Error("resource is archived"), { code: "RESOURCE_ARCHIVED" });
 
-export const createResourceProcessor = ({ config, sqlite, materialReader, audit }) => {
+export const createResourceProcessor = ({ config, sqlite, materialReader, audit, embeddingProvider = null }) => {
   const queueImpactScan = (resourceVersionId) => {
     const active = sqlite.prepare("SELECT id FROM tasks WHERE type='wiki:impact-scan' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(resourceVersionId);
     if (active) return active.id;
@@ -19,7 +19,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
     const runId = crypto.randomUUID();
     const timestamp = now();
     sqlite.transaction(() => {
-      sqlite.prepare("INSERT INTO processing_runs (id,resource_version_id,status,chunker_name,chunker_version,chunking_config,input_sha256,requested_ocr_mode,requested_ocr_provider,capabilities,created_at,updated_at) VALUES (?,?, 'processing', 'weknora-adaptive', '1', ?, ?, ?, ?, ?, ?, ?)").run(runId, version.id, JSON.stringify(chunkingConfig), version.content_sha256, processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), timestamp, timestamp);
+      sqlite.prepare("INSERT INTO processing_runs (id,resource_version_id,status,chunker_name,chunker_version,chunking_config,input_sha256,requested_ocr_mode,requested_ocr_provider,capabilities,created_at,updated_at) VALUES (?,?, 'processing', 'weknora-adaptive', '5', ?, ?, ?, ?, ?, ?, ?)").run(runId, version.id, JSON.stringify(chunkingConfig), version.content_sha256, processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), timestamp, timestamp);
       sqlite.prepare("UPDATE resource_versions SET status='processing',error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, version.id);
       refreshResourceStatus(sqlite, version.resource_id, timestamp);
     })();
@@ -45,7 +45,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       assets: parsed.assets || [],
       pages: parsed.pages || [],
       blocks: parsed.blocks?.length ? parsed.blocks : document.blocks,
-      metadata: { ...(parsed.metadata || {}), quality: parsed.quality || {}, ocr: parsed.ocr || null, strategy: document.strategy, strategyChain: document.strategyChain, validation: document.validation, profile: document.profile }
+      metadata: { ...(parsed.metadata || {}), quality: parsed.quality || {}, ocr: parsed.ocr || null, strategy: document.strategy, strategyChain: document.strategyChain, validation: document.validation, profile: document.profile, chunking: document.diagnostics }
     };
     const bytes = Buffer.from(JSON.stringify(artifact));
     const storageKey = `canonical/${version.id}/${runId}.json`;
@@ -53,7 +53,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
     return { storageKey, bytes, sha256: sha256(bytes) };
   };
 
-  const outputDigest = (document) => sha256(JSON.stringify(document.output.map((chunk) => ({ sequence: chunk.sequence, type: chunk.chunkType, parentIndex: chunk.parentIndex, start: chunk.start, end: chunk.end, content: chunk.content, contextHeader: chunk.contextHeader || "", forcedSplit: Boolean(chunk.forcedSplit) }))));
+  const outputDigest = (document) => sha256(JSON.stringify(document.output.map((chunk) => ({ sequence: chunk.sequence, type: chunk.chunkType, parentIndex: chunk.parentIndex, start: chunk.start, end: chunk.end, content: chunk.content, contextHeader: chunk.contextHeader || "", canonicalMetadata: chunk.canonicalMetadata || null, sizeUnit: chunk.sizeMetrics?.unit || document.config.sizeUnit, sizeMetrics: chunk.sizeMetrics || null, protectedType: chunk.protectedType || null, tableHeader: chunk.tableHeader || null, splitReason: chunk.splitReason || null, partIndex: chunk.partIndex ?? null, partCount: chunk.partCount ?? null, forcedSplit: Boolean(chunk.forcedSplit) }))));
 
   const pageMetadata = (parsed, chunk) => {
     const pages = (parsed.pages || []).filter((page) => {
@@ -81,7 +81,13 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       if (chunk.chunkType === "parent_text") parentIds.set(chunk.parentIndex, id);
       const parentId = chunk.chunkType === "text" && chunk.parentIndex !== null ? parentIds.get(chunk.parentIndex) || null : null;
       const page = pageMetadata(parsed, chunk);
-      const locator = JSON.stringify({ startOffset: chunk.start, endOffset: chunk.end, resourceVersionId: version.id, processingRunId: runId, parentIndex: chunk.parentIndex, childIndex: chunk.childIndex ?? null, blockTypes: [...new Set([...(chunk.blockTypes || []), ...page.blockKinds])], pageStart: page.pages[0] || null, pageEnd: page.pages.at(-1) || null, pages: page.pages, forcedSplit: Boolean(chunk.forcedSplit) });
+      const blockTypes = [...new Set([...(chunk.blockTypes || []), ...page.blockKinds])];
+      const canonicalMetadata = {
+        ...(chunk.canonicalMetadata || {}),
+        source: { resourceVersionId: version.id, processingRunId: runId, pageStart: page.pages[0] || null, pageEnd: page.pages.at(-1) || null, pages: page.pages },
+        structure: { ...(chunk.canonicalMetadata?.structure || {}), blockTypes }
+      };
+      const locator = JSON.stringify({ startOffset: chunk.start, endOffset: chunk.end, sizeUnit: chunk.sizeMetrics?.unit || document.config.sizeUnit, sizeMetrics: chunk.sizeMetrics || null, canonicalMetadata, resourceVersionId: version.id, processingRunId: runId, parentIndex: chunk.parentIndex, childIndex: chunk.childIndex ?? null, blockTypes, protectedType: chunk.protectedType || null, protectedGroup: chunk.protectedGroup || null, tableHeader: chunk.tableHeader || null, splitReason: chunk.splitReason || null, partIndex: chunk.partIndex ?? null, partCount: chunk.partCount ?? null, pageStart: page.pages[0] || null, pageEnd: page.pages.at(-1) || null, pages: page.pages, forcedSplit: Boolean(chunk.forcedSplit) });
       insertChunk.run(id, version.id, runId, parentId, chunk.chunkType, chunk.sequence, chunk.content, chunk.contextHeader || null, chunk.start, chunk.end, locator, document.strategy, chunk.forcedSplit ? 1 : 0, now());
       if (chunk.chunkType === "text") {
         insertFts.run(id, searchableText([chunk.contextHeader, chunk.content].filter(Boolean).join("\n\n")), parsed.title || fresh.title || "");
@@ -95,7 +101,8 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
     const timestamp = now();
     const ocr = parsed.ocr || {};
     const adapter = ocr.adapter || {};
-    sqlite.prepare("UPDATE processing_runs SET status='indexed',parser_name=?,parser_version=?,actual_provider=?,adapter_name=?,adapter_version=?,model_name=?,model_version=?,provider_request_id=?,duration_ms=?,page_count=?,capabilities=?,metrics=?,canonical_storage_key=?,canonical_sha256=?,canonical_byte_size=?,block_count=?,parent_count=?,child_count=?,output_sha256=?,warning_count=?,error_code=NULL,error_summary=NULL,updated_at=? WHERE id=? AND status='processing'").run(parsed.parserName, parsed.parserVersion, parsed.provider || null, adapter.adapterName || null, adapter.adapterVersion || null, adapter.modelName || null, adapter.modelVersion || null, adapter.requestId || null, Date.now() - started, ocr.pageCount || parsed.pages?.length || null, JSON.stringify(ocr.capabilities || processingRequest.capabilities || {}), JSON.stringify({ quality: parsed.quality || {}, warnings: ocr.warnings || [] }), artifact.storageKey, artifact.sha256, artifact.bytes.length, parsed.blocks?.length || document.blocks.length, document.parents.length, document.children.length, outputSha256, ocr.warnings?.length || parsed.quality?.warningCount || 0, timestamp, runId);
+    const processingMetrics = { quality: parsed.quality || {}, chunking: document.diagnostics, warnings: ocr.warnings || [], cacheHit: ocr.cacheHit ?? false, providerCallCount: ocr.providerCallCount ?? 0, ocr: { cacheHit: ocr.cacheHit ?? false, providerCallCount: ocr.providerCallCount ?? 0, cacheKey: ocr.cacheKey || null, sourceSha256: ocr.sourceSha256 || version.content_sha256 } };
+    sqlite.prepare("UPDATE processing_runs SET status='indexed',parser_name=?,parser_version=?,actual_provider=?,adapter_name=?,adapter_version=?,model_name=?,model_version=?,provider_request_id=?,duration_ms=?,page_count=?,capabilities=?,metrics=?,canonical_storage_key=?,canonical_sha256=?,canonical_byte_size=?,block_count=?,parent_count=?,child_count=?,output_sha256=?,warning_count=?,error_code=NULL,error_summary=NULL,updated_at=? WHERE id=? AND status='processing'").run(parsed.parserName, parsed.parserVersion, parsed.provider || null, adapter.adapterName || null, adapter.adapterVersion || null, adapter.modelName || null, adapter.modelVersion || null, adapter.requestId || null, Date.now() - started, ocr.pageCount || parsed.pages?.length || null, JSON.stringify(ocr.capabilities || processingRequest.capabilities || {}), JSON.stringify(processingMetrics), artifact.storageKey, artifact.sha256, artifact.bytes.length, parsed.blocks?.length || document.blocks.length, document.parents.length, document.children.length, outputSha256, ocr.warnings?.length || parsed.quality?.warningCount || 0, timestamp, runId);
     sqlite.prepare("UPDATE resource_versions SET title=COALESCE(?,title),parser_name=?,parser_version=?,parse_duration_ms=?,active_processing_run_id=?,status='indexed',error_summary=NULL,updated_at=? WHERE id=?").run(parsed.title, parsed.parserName, parsed.parserVersion, Date.now() - started, runId, timestamp, version.id);
     const latest = sqlite.prepare("SELECT id FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC LIMIT 1").get(version.resource_id);
     if (latest?.id === version.id) {
@@ -109,11 +116,13 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       sqlite.prepare("UPDATE processing_runs SET status='superseded',updated_at=? WHERE id=? AND status='indexed'").run(timestamp, previousRun);
     }
     queueImpactScan(version.id);
-    audit("indexed", "processing_run", runId, { resourceVersionId: version.id, parents: document.parents.length, children: document.children.length, strategy: document.strategy });
+    audit("indexed", "processing_run", runId, { resourceVersionId: version.id, parents: document.parents.length, children: document.children.length, strategy: document.strategy, ocrCacheHit: ocr.cacheHit ?? false, ocrProviderCallCount: ocr.providerCallCount ?? 0 });
   })();
 
   const processResource = async (task) => {
-    const resourceVersionId = task.resource_version_id || JSON.parse(task.payload || "{}").resourceVersionId;
+    let taskPayload = {};
+    try { taskPayload = JSON.parse(task.payload || "{}"); } catch { throw Object.assign(new Error("resource processing task payload is invalid"), { code: "VALIDATION_ERROR" }); }
+    const resourceVersionId = task.resource_version_id || taskPayload.resourceVersionId;
     const version = resourceVersionId && sqlite.prepare("SELECT * FROM resource_versions WHERE id=?").get(resourceVersionId);
     if (!version) throw Object.assign(new Error("resource version not found"), { code: "NOT_FOUND" });
     const resource = sqlite.prepare("SELECT status FROM resources WHERE id=?").get(version.resource_id);
@@ -142,10 +151,10 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
       const processingRun = createProcessingRun(version, chunkingConfig, processingRequest);
       runId = processingRun.runId;
       previousRunId = processingRun.previousRunId;
-      const parsed = await materialReader.read(version, { ...attemptHooks(runId), signal: controller.signal, progress: updateProgress });
+      const parsed = await materialReader.read(version, { ...attemptHooks(runId), signal: controller.signal, progress: updateProgress, refreshOcr: taskPayload.refreshOcr === true });
       if (parsed.pages?.length > config.ocrMaxPages) throw Object.assign(new Error("OCR page limit exceeded"), { code: "OCR_LIMIT_EXCEEDED", metadata: { maxPages: config.ocrMaxPages, pageCount: parsed.pages.length } });
       if (parsed.pages?.length) updateProgress({ progress: 99 });
-      const document = chunkDocument(parsed.canonicalText, chunkingConfig);
+      const document = chunkDocument(parsed.canonicalText, chunkingConfig, { blocks: parsed.blocks, pages: parsed.pages, tokenizer: embeddingProvider?.tokenizer || null });
       if (!document.children.length) throw Object.assign(new Error("parsed content produced no child chunks"), { code: "PARSE_FAILED" });
       const artifact = writeCanonicalArtifact(version, runId, parsed, document);
       persistProcessedDocument(version, runId, previousRunId, parsed, document, artifact, started, processingRequest);
@@ -156,6 +165,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit 
           sqlite.prepare("UPDATE processing_runs SET status='failed',error_code=?,error_summary=?,updated_at=? WHERE id=? AND status='processing'").run(caught?.code || "PARSE_FAILED", caught?.message || "processing failed", timestamp, runId);
           const fresh = sqlite.prepare("SELECT * FROM resource_versions WHERE id=?").get(version.id);
           if (fresh?.active_processing_run_id) sqlite.prepare("UPDATE resource_versions SET status='indexed',updated_at=? WHERE id=?").run(timestamp, version.id);
+          else sqlite.prepare("UPDATE resource_versions SET status='failed',error_summary=?,updated_at=? WHERE id=?").run(caught?.message || "processing failed", timestamp, version.id);
           refreshResourceStatus(sqlite, version.resource_id, timestamp);
         })();
         audit("failed", "processing_run", runId, { resourceVersionId: version.id, errorCode: caught?.code || "PARSE_FAILED", error: caught?.message || "processing failed" });

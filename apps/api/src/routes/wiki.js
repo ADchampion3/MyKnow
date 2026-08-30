@@ -15,6 +15,7 @@ import {
   queueEmbeddingTask,
   readBytes,
   updateWikiSearchProjection,
+  utf8ByteLength,
   sha256,
   slugFromTitle,
   templateMarkdown,
@@ -241,7 +242,7 @@ const copyCitations = (sqlite, fromVersionId, toVersionId, timestamp) => {
 };
 
 const insertPageVersion = (ctx, page, { contentMarkdown, baseVersionId, changeSummary = null, restoreOfVersionId = null, citations = undefined, requestId }) => {
-  if (typeof contentMarkdown !== "string" || contentMarkdown.length > MAX_MARKDOWN) throw fail("contentMarkdown must be a string up to 2 MiB");
+  if (typeof contentMarkdown !== "string" || utf8ByteLength(contentMarkdown) > MAX_MARKDOWN) throw fail("contentMarkdown must be a UTF-8 string up to 2 MiB");
   if (citations !== undefined && !Array.isArray(citations)) throw fail("citations must be an array", "WIKI_CITATION_INVALID");
   if (typeof baseVersionId !== "string" || !baseVersionId) throw fail("baseVersionId is required");
   const current = page.current_version_id ? ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=?").get(page.current_version_id) : null;
@@ -394,7 +395,7 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
     if (!template) { ctx.json(res, 500, null, ctx.error("INTERNAL_ERROR", "default wiki template is missing"), requestId); return true; }
     const definition = parseStored(template.definition_json, defaultTemplateDefinition(pageType));
     const contentMarkdown = body?.contentMarkdown ?? body?.content_markdown ?? templateMarkdown(title, definition);
-    if (typeof contentMarkdown !== "string" || contentMarkdown.length > MAX_MARKDOWN) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "contentMarkdown must be a string up to 2 MiB"), requestId); return true; }
+    if (typeof contentMarkdown !== "string" || utf8ByteLength(contentMarkdown) > MAX_MARKDOWN) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "contentMarkdown must be a UTF-8 string up to 2 MiB"), requestId); return true; }
     const timestamp = isoNow(ctx);
     const versionId = crypto.randomUUID();
     const blocks = parseMarkdownBlocks(contentMarkdown);

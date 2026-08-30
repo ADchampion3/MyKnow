@@ -1,412 +1,346 @@
-# MyKnow 检索机制
+# 当前检索机制审核
 
-本文档记录当前已经实现的 Page-centric RAG 检索链路。实现的事实来源是 [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js)、[`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)、API/Worker 路由和 Sprint 4 规格；如果本文档与代码不一致，以代码和可复现检查为准。
+> 状态：基于当前代码的现状文档与设计复盘，不是下一版检索协议。
+>
+> 审核范围：`packages/db/src/retrieval.js`、`packages/db/src/text-tokenizer.js`、`packages/db/src/embeddings.js`、Worker 的 embedding 任务、API 检索路由，以及相关 SQLite/FTS 表。
 
-当前检索的目标是返回可解释、可回链、可审计的证据，不生成答案，也不调用 Agent 或 completion/chat model。当前全局 schema marker 为 `sprint5-agent-tree-v1`，检索子系统版本为 `sprint4-rag-retrieval-v1`。
+## 1. 结论先行
 
-## 1. 端到端流程
+当前检索由两个并行通道组成：
+
+1. **Wiki 通道**：以当前版本的 Wiki page 为对象；
+2. **Raw 通道**：以当前 processing run 的 child chunk 为对象。
+
+两个通道都先做关键词召回；在配置允许时，再做向量召回；随后各通道内部用 RRF（Reciprocal Rank Fusion）融合结果。Wiki 结果还会经过置信度 gate，只有高置信 seed 才能触发最多两跳的 Wiki link graph 扩展。最后系统做 provenance 查询和上下文预算组装，并把整次 retrieval run 保存下来。
+
+这套机制覆盖了“精确匹配、语义匹配、知识图谱扩展、来源追踪、上下文限额”几个基本问题，作为本地 MVP baseline 是完整的。但它目前不应被称为“关键词 + 向量 + reranker”：现有的 RRF 是**排名融合**，没有独立的学习型或规则型二次 reranker。
+
+## 2. 主流程
 
 ```text
 POST /api/retrieval/query
-        |
-        v
-请求校验 + knowledge base / space 范围校验
-        |
-        +--> 查询规范化、英文 token/stopword、CJK bigram
-        |
-        +--> Wiki FTS ------------------+
-        |                               |
-        +--> raw child FTS -------------+--> 可选 query embedding
-                                        |
-                                        v
-                              各通道独立 RRF 合并
-                                        |
-                                        v
-                              Wiki seed confidence gate
-                                        |
-                        +---------------+---------------+
-                        |                               |
-                        v                               v
-                 Wiki graph expansion            provenance lookup
-                        |                               |
-                        +---------------+---------------+
-                                        |
-                                        v
-                               context assembly
-                                        |
-                                        v
-                             persist retrieval trace
-                                        |
-                                        v
-                                   API response
-
-GET /api/retrieval/runs/:id
-        |
-        v
-                         trace replay（raw 结果只返回元数据）
+    -> 校验知识库/空间/查询参数
+    -> 查询规范化与分词
+    -> Wiki FTS + Raw FTS
+    -> 可选：生成 query embedding，扫描候选向量
+    -> 每个通道做 RRF 融合与 topK
+    -> Wiki seed gate
+    -> Wiki link graph 两跳扩展
+    -> Wiki provenance + Raw locator
+    -> 60/40 上下文预算组装
+    -> 持久化 retrieval_runs 并返回 trace
 ```
 
-检索实现位于 DB 包，API 只负责 HTTP 合同和错误包装；Worker 负责生成派生 embedding。这样 Web、API 和 Worker 使用同一套检索领域规则。
+主入口是 [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js) 的 `POST /api/retrieval/query`。底层编排集中在 [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js) 的 `executeRetrieval`。
 
-## 2. API 合同与范围
+仓库还保留了 `GET /api/search`。它是一个较低层的 Raw FTS 查询入口，使用自己的空格切词、AND + 前缀匹配和 SQLite FTS rank，不经过下面描述的 tokenizer、向量、RRF、Wiki graph、provenance 和上下文组装。它应被视为独立的 legacy lexical API，而不是主检索流程的一部分。
 
-### 2.1 发起检索
+## 3. 检索对象与过滤边界
 
-`POST /api/retrieval/query`
+### 3.1 Wiki 对象
 
-请求字段：
+Wiki 检索对象是 `wiki_pages` 的当前版本：
 
-| 字段 | 必填 | 默认值 | 约束 |
-|---|---:|---:|---|
-| `knowledgeBaseId` | 是 | - | UUID；必须指向 active knowledge base |
-| `spaceId` | 否 | `null` | UUID；必须属于该 knowledge base 的 active space |
-| `query` | 是 | - | NFKC 规范化后 1–200 个字符 |
-| `wikiTopK` | 否 | `5` | 整数 1–20 |
-| `rawTopK` | 否 | `10` | 整数 1–20 |
-| `contextBudgetTokens` | 否 | `8000` | 整数 1–50000 |
+- 只查指定知识库；
+- 可按 `spaceId` 过滤；
+- 只查 `active` page；
+- 排除 `index` 和 `log` 系统页；
+- 要求 page 的 `current_version_id` 与 FTS/embedding 对应版本一致。
 
-请求体必须是对象；空 JSON、非法 ID、非法 Top-K 或 budget 返回 `400 / VALIDATION_ERROR`。不存在的知识库或空间返回 `NOT_FOUND`。
+Wiki FTS 以 page version 为索引对象，Wiki link edge 以“来源 page + 来源版本”为关系身份。
 
-### 2.2 结果范围
+### 3.2 Raw 对象
 
-- Wiki 通道只检索当前 active Wiki 页面版本，排除 `index` 和 `log` 系统页。
-- `spaceId` 只过滤 Wiki 通道。
-- raw 通道检索整个 knowledge base，因为当前资源还没有 resource-space 关联；trace 中固定记录 `rawScope: "knowledge_base"`。
-- raw 通道只使用当前资源版本、当前成功 processing run、active 的 `text` child chunk。
-- 历史版本和 superseded chunk 不进入当前检索。
+Raw 检索对象是当前资源版本、当前 processing run 下的 `chunk_type='text'` child：
 
-主要响应结构：
+- 只查指定知识库关联的资源；
+- 排除 archived resource；
+- 要求 resource 的 current version、resource version 的 active processing run、processing run 的 indexed 状态全部一致；
+- 排除 superseded chunk；
+- parent chunk 不直接召回，只在结果上下文中补回。
 
-```json
-{
-  "traceId": "<uuid>",
-  "scope": {
-    "knowledgeBaseId": "<uuid>",
-    "spaceId": "<uuid>",
-    "rawScope": "knowledge_base"
-  },
-  "wiki": { "seeds": [], "graphExpanded": [] },
-  "raw": { "results": [] },
-  "provenance": [],
-  "context": {
-    "items": [],
-    "markdown": "",
-    "estimatedTokens": 0,
-    "truncated": false
-  },
-  "vector": {},
-  "metrics": {}
-}
+### 3.3 当前作用域差异
+
+API 接受 `knowledgeBaseId` 和可选 `spaceId`，但当前数据库只有 resource 与 knowledge base 的关联，没有 resource 与 space 的关联。因此：
+
+- `spaceId` 会限制 Wiki 结果；
+- Raw 结果仍覆盖该知识库下所有资源。
+
+`trace.scope.rawScope` 当前也固定记录为 `knowledge_base`。如果产品语义要求“空间是完整检索边界”，这部分需要先补领域关系或重新定义空间含义。
+
+## 4. 查询规范化与关键词召回
+
+### 4.1 Tokenizer
+
+查询先做 NFKC 规范化、转小写和空白折叠。之后：
+
+- 拉丁字母和数字连续串作为 word token；
+- 英文停用词会从查询 terms 中移除；
+- Han 字符连续串会生成相邻 bigram，例如 `知识库` 生成 `知识`、`识库`；
+- 最终 terms 是英文 token 与 CJK bigram 的去重集合。
+
+例如：
+
+```text
+查询：知识库 retrieval
+terms：retrieval、知识、识库
+FTS："retrieval" OR "知识" OR "识库"
 ```
 
-## 3. 关键词检索
+实现见 [`packages/db/src/text-tokenizer.js`](../packages/db/src/text-tokenizer.js) 和 `retrieval.js` 的 `tokenizeQuery`/`ftsQueryFor`。
 
-### 3.1 查询规范化
+### 4.2 索引文本
 
-[`packages/db/src/text-tokenizer.js`](../packages/db/src/text-tokenizer.js) 提供共享的文本扫描逻辑：
+写入 `resource_fts` 或 `wiki_fts` 时，`searchableText` 同时保存：
 
-- Unicode NFKC 规范化、大小写和空白规范化由 retrieval 层完成。
-- 英文/数字词进入 `words`。
-- 连续 CJK 字符生成相邻二元组，例如 `发布流程` 生成 `发布`、`布流`、`流程`。
-- 查询中的英文 stopwords 会被移除，但会记录在 trace 的 `keyword.stopwords` 中。
-- 多词查询使用 OR 召回，不要求每个词都命中。
-- FTS 查询对每个 term 做引号转义后用 `OR` 连接。
+1. 原始文本；
+2. word token 以空格拼接的副本；
+3. CJK bigram 以空格拼接的副本。
 
-索引文本通过 `searchableText()` 生成，包含原始文本、英文 token 和 CJK bigram，保证查询和建索引使用同一套 token 规则。
+这样做是为了让 SQLite FTS5 的默认 tokenizer 也能对中文产生可匹配的词片段。它不是中文分词器，也不会理解词性、同义词、实体或拼写变体。
 
-### 3.2 两个 FTS 通道
+### 4.3 自定义关键词评分
 
-Wiki 结果来自 `wiki_fts`，索引单位是当前 Wiki 页面版本，结果包含：
-
-- 页面 ID、页面版本 ID、标题、slug 和 page type。
-- 当前页面内容的 snippet。
-- 命中的 block keys，作为 Wiki locator。
-- keyword score 和可解释的 `matchedFeatures`。
-
-raw 结果来自已有的 `resource_fts`，索引单位是 child chunk，结果包含：
-
-- chunk、resource、resource version、processing run ID。
-- child content、parent context、context header。
-- start/end offset 和完整 locator。
-- keyword score 和可解释的 `matchedFeatures`。
-
-当前 FTS 候选读取上限为 Wiki 200 行、raw 400 行，之后再在应用层计算和排序；最终结果仍受请求的各自 Top-K 限制。
-
-### 3.3 可解释评分
-
-每个页面或 raw chunk 都使用同一个归一化评分模型：
+FTS 负责找候选，最终关键词相关性由 JavaScript 重新计算。对每个候选，系统计算：
 
 ```text
 score = min(1,
-  0.40 × term coverage
-  + 0.20 × title coverage
-  + 0.25 × phrase hit
-  + 0.15 × full-text hit
+  0.40 * 内容 term 覆盖率
+  + 0.20 * 标题 term 覆盖率
+  + 0.25 * 完整短语命中
+  + 0.15 * 全部 terms 都命中
 )
 ```
 
-trace 会保留：
+候选命中至少一个 OR term 后，再按这个 `normalizedScore` 排序。查询与索引文本中的 term 集合均来自同一 tokenizer，因此评分和召回的词粒度一致。
 
-- 所有 query terms。
-- `matchedTerms` 和 `missingTerms`。
-- 标题命中、短语命中、全词命中。
-- `coverage`、`titleCoverage` 和归一化分数。
+这里的“完整短语命中”是规范化字符串的 substring 命中，不是 FTS phrase query；标点、空格和中英文混排可能影响结果。
 
-Wiki 和 raw 首先分别完成关键词排序，彼此不共享 Top-K 配额。
+## 5. 向量召回
 
-## 4. 可选向量检索
+### 5.1 向量生成
 
-### 4.1 Provider 和派生数据
+向量是异步派生数据，不在资源处理事务中同步生成。Worker 启动时会为缺失向量的当前 Wiki page 和 Raw child 排入 `retrieval:embed` 任务。
 
-[`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js) 定义窄的 embedding provider 接口。当前内置 deterministic mock provider 和 OpenAI-compatible HTTP provider：
-
-- 默认 provider：`mock`。
-- 默认 model：`mock-hash-v1`。
-- 默认维度：32；合法范围为 4–4096。
-- 使用 token 的 SHA-256 hash 生成并归一化向量，不需要 API key。
-- `openai-compatible`（也接受 `openai`）向配置的 `/embeddings` 端点发送 `{ model, input, dimensions }`，兼容本地 vLLM/OpenAI-compatible 服务；返回向量必须是 4–4096 个有限数字。Provider 记录实际返回维度，检索只合并相同维度的派生向量；某些服务会忽略请求中的 `dimensions`，不会被客户端静默截断。
-- 使用 cosine similarity 排序。
-
-`retrieval_embeddings` 是可重建的派生表，支持两类 owner：
-
-- `wiki_page`：绑定 `page_version_id`。
-- `raw_chunk`：绑定 `resource_version_id` 和 `processing_run_id`。
-
-向量行有 `ready` / `failed` 状态，并记录 provider、model、dimensions 和错误摘要。原始材料、版本、processing run 和 audit log 不依赖向量行的存在。
-
-### 4.2 生成时机
-
-- Wiki 页面版本保存成功后，API 排队 Wiki page embedding task。
-- 资源成功索引 child chunks 后，Worker 排队 raw chunk embedding task。
-- Worker 启动时扫描当前有效页面和 raw chunks，只为没有 ready embedding 的对象补排队。
-- 同一批次使用 embedding task cache；已有 active task 或 ready embedding 不重复创建。
-
-### 4.3 查询时合并
-
-向量开启时，API 只生成一次 query embedding，然后分别扫描当前范围内 ready 的 Wiki/raw embedding。关键词结果和向量结果在每个通道内部使用 Reciprocal Rank Fusion 合并：
+Raw child 的 embedding 输入是：
 
 ```text
-RRF = 1 / (60 + keyword rank) + 1 / (60 + vector rank)
+contextHeader（标题路径、表头等结构上下文） + child content
 ```
 
-最终分别截取 Wiki `wikiTopK` 和 raw `rawTopK`。
+分块器记录的 `sizeMetrics.estimatedEmbeddingTokens` 与检索的 `estimatedTokens` 默认使用同一个跨语言启发式估算：中文 Han 字符、emoji、拉丁/数字串、空白和符号按不同规则计数。embedding provider 可以通过可选 `tokenizer.countTokens(text)` seam 提供真实 token 数；注入后，分块会额外记录 `provider*Tokens`，检索上下文预算和 trace 也使用该 tokenizer。没有 provider tokenizer 时，`contextBudgetTokens` 的公开含义仍是“估算 token 预算”。
 
-以下情况不会阻断关键词检索：
-
-| 情况 | trace 中的 vector 状态 | 结果行为 |
-|---|---|---|
-| `RETRIEVAL_VECTOR_ENABLED=false` | `disabled` | 只走关键词和 graph |
-| provider 超时 | `degraded` + `EMBEDDING_TIMEOUT` | 只走关键词和 graph |
-| provider 失败 | `degraded` + `EMBEDDING_FAILED` | 只走关键词和 graph |
-| provider 未配置 | `degraded` + `EMBEDDING_PROVIDER_UNAVAILABLE` | 只走关键词和 graph |
-| 没有 ready 向量 | `no_embeddings` | 保留关键词结果 |
-
-配置入口：
+Wiki page 的 embedding 输入是：
 
 ```text
-RETRIEVAL_VECTOR_ENABLED=true|false
-EMBEDDING_PROVIDER=mock|openai-compatible|timeout|failed|...
-EMBEDDING_MODEL=mock-hash-v1
-EMBEDDING_DIMENSIONS=32
-EMBEDDING_FAILURE_MODE=timeout|failed
-EMBEDDING_API_BASE_URL=http://localhost:9000/v1/embeddings
-EMBEDDING_API_KEY=
+page title + page content
 ```
 
-`EMBEDDING_API_BASE_URL` 可以填写完整的 `/embeddings` URL，也可以填写 API base URL（例如 `http://localhost:9000/v1`），Provider 会补上 `/embeddings`。真实模型检查会请求 `qwen3-embedding-8b` 和 1024 维；如果服务忽略该参数，检查会同时报告实际返回维度，不改变常规 mock 检查：
+向量输入有 SHA-256 摘要，可按相同输入、provider、model、dimension 命中缓存。任务实现见 [`apps/worker/src/retrieval/embeddings.js`](../apps/worker/src/retrieval/embeddings.js)。
 
-```powershell
-npm run check:retrieval-real
-```
+### 5.2 Provider 与存储
 
-当前向量实现是 SQLite 有上限扫描，适合本地单用户 MVP。`retrieval.js` 中的 `ponytail:` 注释记录了规模超过本地上限后引入带身份索引或 ANN 存储的升级路径。
+当前支持：
 
-## 5. Wiki seed gate 与 graph expansion
+- 默认 `mock`：基于 token 的确定性 hash 向量，默认 32 维，只用于本地行为和流程验证；
+- `openai` / `openai-compatible`：通过 HTTP embeddings 接口生成真实向量；
+- `none`、`disabled` 或关闭配置：禁用向量召回。
 
-### 5.1 Seed gate
+向量以 JSON 数组保存在 `retrieval_embeddings`，没有 ANN/vector index。查询时把符合 provider、model、dimension、版本和 active 条件的向量全部读出，在 JavaScript 中计算 cosine similarity，再取前 200 个。这是一个明确的本地 MVP 复杂度上限，数据规模增大后会变成主要瓶颈。
 
-Wiki 关键词/向量合并后，所有 Wiki 结果都会带 `seedGate`，但只有高置信结果能启动 graph：
+### 5.3 故障语义
+
+通常的 embedding 失败会把向量阶段标记为 `disabled` 或 `degraded`，继续使用关键词结果；没有可用向量时也会正常完成关键词检索。显式的 egress 拒绝会直接失败，因为这代表安全策略不允许发出请求，而不是普通召回降级。
+
+## 6. 通道内融合与排序
+
+Wiki 和 Raw 分别完成关键词召回、向量召回和融合，不会把 Wiki page 与 Raw chunk 放在同一个候选排序池中。
+
+每个通道的候选上限是：
+
+- Wiki 关键词最多 200 行；
+- Raw 关键词最多 400 行；
+- 向量扫描后最多保留 200 个；
+- 默认输出 `wikiTopK=5`、`rawTopK=10`，请求上限为 20。
+
+融合使用 RRF：
 
 ```text
-keywordScore >= 0.70
-且当前结果分数 - 下一名结果分数 >= 0.10
+rrfScore = 1 / (60 + keywordRank) + 1 / (60 + vectorRank)
 ```
 
-gate 会记录：
+未出现在某一路的候选，该路贡献为 0。最终先按 `rrfScore`，再按 `normalizedScore` 和稳定 ID 排序。
 
-- `minScore`、`minMargin`。
-- 当前分数、相邻结果分数和 margin。
-- `high_confidence`、`score_below_min` 或 `margin_below_min` 原因。
+注意：`normalizedScore` 在同时命中关键词时保留关键词 score；只有向量命中的候选才把 cosine similarity 从 `[-1, 1]` 线性映射到 `[0, 1]`。因此 `normalizedScore` 不是跨候选、跨通道可比较的统一概率，也不能直接解释为“相关度百分比”。真正的融合顺序是 `rrfScore`。
 
-低置信 Wiki 结果仍可以进入 context，但不会扩图。
+## 7. Wiki seed gate 与图扩展
 
-### 5.2 Link projection
+Wiki 融合结果不会全部参与图扩展。当前 seed gate 要求：
 
-当前 Wiki 页面版本中的显式 `wiki://UUID` 链接会写入 `wiki_link_edges`。支持：
+- 有关键词排名；
+- `keywordScore >= 0.70`；
+- 与下一个候选的分数差 `margin >= 0.10`。
 
-- Markdown link：`[Checklist](wiki://<uuid>)`。
-- 裸链接：`wiki://<uuid>`。
-- 只保留同一 knowledge base 内存在、未归档、非系统页的目标。
-- 页面版本变化时重建该页面的 FTS 行和出边。
+通过 gate 的 page 才是 graph seed。每个 seed 最多扩展两跳：
 
-raw chunk 永远不会成为 graph 节点，也不会触发 graph traversal。
+| 跳数 | 分数衰减 |
+| ---: | ---: |
+| 1 | `0.5 * seedScore` |
+| 2 | `0.25 * seedScore` |
 
-### 5.3 Expansion 规则
+扩展同时考虑出边和入边，只在同一知识库、当前 page version、非系统页和非 archived page 中遍历；每一层最多选择 10 个候选，并记录 `graphPath`、link text 和方向。
 
-- 只从通过 gate 的 Wiki seed 开始。
-- 支持 outbound 和 inbound 两个方向。
-- 最多 2 hop。
-- hop 1 decay 为 `0.5`，hop 2 decay 为 `0.25`。
-- 每层最多选 10 个页面。
-- 同一页面只保留最佳路径，结果按 score、page ID 稳定排序。
-- 只允许同一 knowledge base 的 active 页面。
-- 指定 `spaceId` 时，graph 目标也必须属于该 space。
-- graph expansion 不占用 Wiki seed 的 Top-K 配额，单独记录在 `graphExpanded`。
+这个设计把“直接命中”和“关系邻居”分开：直接命中必须足够可信，邻居只能以衰减分数进入上下文，避免低置信 query 把整张 Wiki 图带入答案。
 
-每个 graph 结果保留 `hop`、`decay`、`seedPageId`、`path` 和 `graphPath`，方便在 Web 和 trace 中解释为什么被带入。
+但当前 gate 只看关键词证据。一个只有高向量相似度、没有任何关键词命中的 Wiki page，即使进入了融合结果，也不能成为 graph seed。这是一个偏保守的可追溯性策略，但会牺牲语义检索驱动的图扩展能力。
 
-## 6. Provenance lookup
+## 8. Provenance 与上下文组装
 
-Provenance 只针对 Wiki seed 和 graph 页面做 lookup，不把 citation 当作 graph edge。
+### 8.1 Provenance
 
-对页面当前版本的 citation，系统返回：
+Wiki page 的 provenance 来自 `wiki_citations`：
 
-- citation、Wiki page/version ID。
-- resource/resource version ID 和标题。
-- locator。
-- citation status 和 stale reason。
-- source integrity：`valid`、`invalid` 或 `unavailable`。
-- `complete`、`unavailable`、`needs_review` 或 `broken` 等 completeness。
+- 关联到 page 当前版本；
+- 查询来源资源版本和 locator；
+- 读取 source storage 并比较字节数与 SHA-256；
+- 返回 citation、资源版本、状态、完整性和 locator。
 
-Provenance 默认只返回来源元数据，不自动把 raw 正文带入 Wiki 结果；用户命中 raw 通道或主动展开来源时才读取原文。
+Raw child 不经过 Wiki citation 表，直接用 child locator、resource version 和 processing run 作为来源信息。也就是说，Raw 的来源链是“检索对象本身的处理坐标”，Wiki 的来源链是“Wiki block 到原始资源”的显式引用。
 
-## 7. Context assembly
+### 8.2 固定预算
 
-### 7.1 预算
-
-总预算按固定比例划分：
+默认上下文预算为 8000 个估算 token，最大 50000；固定分配为：
 
 ```text
-Wiki budget = floor(total × 0.60)
-Raw budget  = total - Wiki budget
+Wiki：60%
+Raw ：40%
 ```
 
-Wiki 与 raw 的预算互不争抢。结果顺序为 Wiki seeds、Wiki graph、raw results；同一 Wiki 页面只加入一次。
+Wiki 结果按 seed 后 graph 的顺序加入，同一 page 去重：
 
-### 7.2 Wiki context
+1. 页面足够小则放入全文；
+2. 页面过大则找命中 block，并带上前后相邻 block；
+3. 仍超预算时按字符截断。
 
-在页面内容未超预算时，加入标题和完整当前 Markdown。超预算时：
-
-1. 找出命中 query term 的 block。
-2. 优先保留命中 block 及前后相邻 block。
-3. 使用确定性的字符/token 估算器裁切。
-4. 记录 `truncated=true` 和 `truncatedItems`，不静默截断。
-
-每个 Wiki context item 保留 page/version、locator、graph path、文本、估算 token 数和 provenance。
-
-### 7.3 Raw context
-
-raw item 按以下结构组装：
+Raw 结果按排序顺序加入，内容形态是：
 
 ```text
-### Raw · <resource name>
-Context header: ...
-Parent context: ...
-Child chunk: ...
+标题
+    + contextHeader（标题路径、表头等结构上下文）
+    + parent context
+    + child chunk
 ```
 
-未超预算时保留完整 child、parent 和 context header。超预算时优先保留 child，再在剩余预算中补 parent context，并记录 `chunk_truncated`。
+超预算时优先保留 child，再尽量补 parent。最终返回 `items`、拼接后的 `markdown`、每个 item 的 locator、估算 token 数以及截断原因。
 
-当前没有 provider tokenizer，token 估算为 Unicode code point 数除以 4 后向上取整，最少为 1；未来接入实际模型时只替换估算器，不改变 context item 合同。
+当前 token 估算按 Han 字符、emoji、连续拉丁/数字串、空白和符号分别处理，不是实际模型 tokenizer。因此没有 provider tokenizer 时预算是工程近似，不是模型 API 的硬保证；它只作为 code point canonical 大小之外的模型侧二级约束。只有 provider 明确提供真实 tokenizer 时，才允许分块配置 `parentTokenTarget`/`childTokenTarget`。
 
-Context 只在本 Sprint 组装并返回/保存，不交给 completion/chat model。
+## 9. Trace 与持久化
 
-## 8. Trace、replay 与审计
+一次主检索会写入 `retrieval_runs`，包括：
 
-### 8.1 `retrieval_runs`
+- 查询与作用域；
+- Wiki seeds、graph expansion；
+- Raw seeds；
+- 关键词分词、候选数量、各阶段耗时；
+- 向量 provider/model/status；
+- provenance lookup；
+- 上下文 item、markdown、预算和截断信息；
+- 错误信息和完整 trace JSON。
 
-每次检索都会保存：
+数据库结构见 [`packages/db/src/database/migrations.js`](../packages/db/src/database/migrations.js) 的 `retrieval_embeddings`、`retrieval_runs`、`resource_fts`、`wiki_fts` 和 `wiki_link_edges`。
 
-- query、knowledge base、space、Top-K 和 context budget。
-- Wiki seeds、raw seeds、seed gate 和 graph expansion。
-- provenance lookups。
-- context items、组装 Markdown、预算和截断状态。
-- keyword 特征、vector provider/status、各阶段耗时。
-- 成功或失败状态及错误原因。
+Raw seed 的持久化视图会去掉 `content`、parent、header 和 snippet，完整文本仍在 `context_items/context_markdown` 中用于本次回放。审计日志只记录计数、状态和向量状态，不直接写入正文。
 
-### 8.2 原文保护
+## 10. 当前实现符合的原理
 
-实时 `POST` 响应需要返回 raw 命中的内容，供检索器查看；但写入 `retrieval_runs` 和之后 `GET /api/retrieval/runs/:id` replay 时，raw result 会剥离：
+检索质量的最终判断以命中率、召回率、排序质量和上下文可用性等下游 retrieval 指标为准；chunk 数量、平均 code point、protected 边界、forced split 和 overlap 数量只作为结构诊断指标。结构指标可以解释回归，但不能单独证明检索质量提升。
 
-- `content`
-- `parentContext`
-- `contextHeader`
-- `snippet`
+### 10.1 Hybrid retrieval
 
-context snapshot 仍保留按预算组装后的文本，因为它是本次检索明确生成的上下文快照。replay 读取时还会再次清洗，避免旧 trace 泄露 raw 结果正文。
+关键词适合精确名称、数字、错误码和专有名词；向量适合表达改写和语义近似。两路先独立排序，再用 rank fusion 合并，避免强行把不可比的原始分数线性相加。
 
-审计日志只记录状态、trace ID、结果数量、vector 状态和是否截断，不记录 API key 或 raw 正文。检索 trace 持久化失败不会被静默吞掉；失败 trace 也会尽力保留并向调用方报告持久化/审计错误。
+### 10.2 Hard filter before relevance
 
-## 9. 派生索引生命周期
+当前版本、processing run、资源状态和 Wiki page 状态在 SQL 阶段过滤，避免旧版本或 superseded chunk 以高分污染结果。这比先召回再在应用层过滤更可靠。
 
-相关派生对象：
+### 10.3 Graph expansion needs a confidence gate
 
-| 对象 | 作用 | 来源 |
-|---|---|---|
-| `wiki_fts` | 当前 Wiki 页面关键词索引 | 当前 Wiki page version |
-| `wiki_link_edges` | 当前 Wiki 显式链接图 | 当前 Markdown 中的 `wiki://UUID` |
-| `resource_fts` | 当前 raw child chunk 关键词索引 | 当前成功 processing run |
-| `retrieval_embeddings` | Wiki/raw 向量派生索引 | Worker embedding task |
-| `retrieval_runs` | 检索 trace 和 context replay | 每次 retrieval |
+图扩展会引入 query 没有直接命中的页面，必须限制 seed 质量、跳数和衰减。当前 gate + 两跳衰减满足“相关邻居可补充、低置信结果不能无限扩散”的基本原则。
 
-Wiki 页面保存和资源索引成功后分别更新相应的 FTS/edge 并排 embedding task。旧的源材料、资源版本、Wiki 版本、引用、processing run 和审计记录不物理删除。
+### 10.4 Context selection is separate from ranking
 
-`rebuildRetrievalIndexes()` 可以清空并重建上述派生索引；它不会删除原始材料和审计记录。跨 Sprint 的旧数据库需要按 README 中的精确路径执行 rebuild，而空数据库会在 API/Worker 启动时完成迁移。
+排序结果不等于可以直接塞给模型的上下文。当前流程把召回、来源、去重、页面 block 选择、parent 补充和预算截断分开，符合 RAG 的分层职责。
 
-## 10. Web 观察面
+### 10.5 Retrieval must be replayable
 
-Web overview 中的 Retrieval checker 展示：
+保存 query、scope、候选摘要、版本、locator、预算和 trace，能够解释一次回答使用了什么派生数据。这对调试和来源审计比只保存最终答案更重要。
 
-- Wiki seeds、raw child chunks 和 graph expansion 三个独立区域。
-- Wiki/raw scope 和独立 Top-K。
-- score、seed gate、graph path、decay、provenance。
-- context 总预算及 Wiki/raw 分预算、截断状态。
-- vector provider/status 和阶段耗时。
+## 11. 审核发现与边界
 
-结果链接保留来源定位：
+以下是当前限制与后续优化边界。
 
-- Wiki/graph：打开准确的 Wiki page version。
-- raw：打开 `/api/resources/:resourceId/versions/:versionId/preview`，并携带 `startOffset` / `endOffset`。
+### 高影响：空间作用域不完整
 
-该页面是检索检查器，不生成答案，也不写入 Wiki。
+用户可以选择 space，但 Raw 资源没有 space 关联，导致同一个请求里的 Wiki 与 Raw 实际作用域不同。如果空间被定义为检索边界，这会造成“界面显示选择了空间、答案却使用了空间外原始材料”的语义不一致。
 
-## 11. 验证入口
+### 高影响：向量查询是全表扫描
 
-Focused checks：
+向量 JSON 存储和 JavaScript cosine scan 在数据量增长时是 O(N) 读和 O(N) 计算。它适合本地小规模数据，不适合直接扩展到大量 chunk；未来要在 SQLite vector extension、LanceDB 或其他 ANN 后端之间作明确选择。
 
-```powershell
-npm run check:retrieval-contract   # API、范围、CJK、replay、locator、校验
-npm run check:retrieval-graph      # seed gate、双向 graph、hop 和边界
-npm run check:retrieval-budget     # 60/40 budget、截断和 provenance
-npm run check:retrieval-vector     # provider、降级、Worker embedding 和去重
-npm run check:embedding-provider  # OpenAI-compatible HTTP 请求合同
-npm run check:retrieval-real      # 本地真实 OpenAI-compatible embedding 模型端到端检查
-npm run check:retrieval-performance # 合成规模下的召回和核心耗时
-npm run check:retrieval
-npm run check:all
-npm --workspace apps/web run build
-```
+### 高影响：没有真正的 reranker
 
-性能检查使用内存 SQLite 和确定性合成数据：100 个性能文档、5000 个新增 child chunks、100 个新增 Wiki 页面，再加基础 fixture 的 1 个 raw child chunk 和 6 个 Wiki 页面。它执行 20 个标注查询，验证每个 query 的 raw Top-10 至少命中一个正确 term；该指标用于 Sprint 验收，不代表真实生产数据分布或端到端 HTTP/Provider 延迟。
+RRF 只使用两个召回排名，不能判断一个候选是否完整回答问题、是否包含条件/例外，也不会做 cross-encoder 或 LLM 重排。若产品需要“候选相关性”和“答案可用性”的第二层判断，必须单独定义 reranker 输入、输出和成本边界。
 
-证据目录为 [`artifacts/sprint4/`](../artifacts/sprint4/)，验收摘要为 [`acceptance-report.md`](../artifacts/sprint4/acceptance-report.md)。
+### 中影响：seed gate 偏向关键词
 
-## 12. 相关实现
+gate 要求 `keywordRank` 且使用 `keywordScore`，所以向量独有的 Wiki 命中不能触发图扩展。这样可避免纯语义误扩散，但会让图检索依赖词面重叠；是否允许高置信向量 seed 应成为显式策略，而不是由当前实现隐含决定。
 
-- [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js)：查询规范化、关键词/向量合并、seed gate、graph、provenance、context、trace 和派生任务。
-- [`packages/db/src/text-tokenizer.js`](../packages/db/src/text-tokenizer.js)：共享英文词和 CJK bigram 扫描。
-- [`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)：provider seam、mock vector 和 cosine similarity。
-- [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js)：retrieval REST routes。
-- [`apps/api/src/routes/resources.js`](../apps/api/src/routes/resources.js)：raw locator preview。
-- [`apps/worker/src/retrieval/embeddings.js`](../apps/worker/src/retrieval/embeddings.js)：embedding task processor。
-- [`packages/db/src/database/migrations.js`](../packages/db/src/database/migrations.js)：retrieval schema 和 derived indexes。
+### 中影响：存在两条不一致的查询路径
+
+`/api/retrieval/query` 使用共享 tokenizer、混合召回、RRF、graph、provenance 和 context assembly；`/api/search` 使用另一套 FTS 查询。两者对中文、前缀、AND/OR、排序、作用域和返回形态的解释不同，后续容易出现“同一个问题在搜索框和 Agent 中得到不同结果”的维护成本。
+
+### 中影响：分数没有统一标尺
+
+关键词 score 是 term 覆盖规则，向量 score 是 cosine similarity，RRF 是 rank 分数。当前排序是可用的，但任何 UI 进度条或业务阈值都不应直接把 `normalizedScore` 当成概率。seed gate 也只适用于当前这套关键词规则，不能自动迁移到新的 scorer。
+
+### 中影响：上下文预算不是模型 tokenizer 预算
+
+固定 60/40 比例简单且可解释，但无法根据问题类型动态调整；没有 provider tokenizer 时，启发式估算即使已区分 Han 字符、拉丁/数字串、空白、emoji 和符号，仍可能与实际 provider 偏差很大。若 provider 提供真实 tokenizer，当前上下文组装会直接使用它做预算校验。
+
+### 中影响：Raw provenance 弱于 Wiki provenance
+
+Raw 结果包含 locator 和处理运行 ID，但不会在每次检索时重新读取源文件并校验完整性，也没有像 Wiki citation 那样的 block 级引用状态。因此“Raw 可定位”不等于“Raw 已完成独立来源校验”。
+
+### 低影响：旧派生结果需要显式清理
+
+重处理后旧 chunk/embedding 不参与 active 查询。现在可以用 `DERIVED_DATA_RETENTION_DAYS` 配置保留天数，并先运行 `npm run db:cleanup-derived -- --dry-run` 查看候选，确认后加 `--confirm` 清理 superseded 或已不再是当前 resource version 的 indexed generation 的 chunks、FTS、旧 embedding、retrieval trace 和 canonical artifact；仍有 queued/running/retrying embedding task 的 generation 会被跳过，避免任务随后读取不到 chunk；原始资源、resource version、processing run 和 audit log 不会被删除。canonical 存储删除失败时命令以非零状态退出，方便重试。
+
+## 12. 当前协议与待定事项
+
+分块协议已经确定：Raw 只检索 active processing run 的 child；embedding 输入使用 `contextHeader + child content`；大小坐标以 code point 为 canonical，检索上下文默认使用明确标注的估算 token 预算，provider tokenizer 可作为二级精确约束；旧 generation 的派生结果按保留周期显式清理但不参与 active 查询。检索质量仍以召回、排序和上下文可用性等下游指标判断，分块结构数据只用于解释回归。
+
+仍待单独决定、且不改变上述分块协议的事项：
+
+1. 检索的唯一公开契约是什么，是否保留 `/api/search`，还是让它成为主检索的简化视图？
+2. space 是否覆盖 Raw resource，还是明确规定 space 只组织 Wiki？
+3. 关键词召回要继续使用 CJK bigram，还是引入可替换的语言 tokenizer/BM25 实现？
+4. 向量后端的规模上限是多少，何时从全表扫描切换到 ANN？
+5. RRF 后是否需要独立 reranker；如果需要，重排的是 Wiki page、Raw child，还是统一候选？
+6. 向量独有结果能否成为 Wiki seed，gate 应基于关键词、向量、融合排名还是证据完整性？
+7. Raw 和 Wiki 是否需要统一的 citation/provenance 对象，以便 Agent 只消费一种来源协议？
+8. 旧版本 embedding 和 retrieval trace 的保留周期由 `DERIVED_DATA_RETENTION_DAYS` 控制，默认 30 天；实际清理通过显式命令执行。
+
+
+## 13. 相关代码
+
+- [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js)：查询规范化、关键词/向量召回、RRF、seed gate、图扩展、provenance、上下文和 trace。
+- [`packages/db/src/text-tokenizer.js`](../packages/db/src/text-tokenizer.js)：英文 token 与 CJK bigram。
+- [`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)：embedding provider、可选真实 tokenizer seam 和向量校验。
+- [`packages/db/src/derived-cleanup.js`](../packages/db/src/derived-cleanup.js)：派生数据保留计划与显式清理。
+- [`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)：embedding provider、hash mock、cosine similarity 和输入摘要。
+- [`apps/worker/src/retrieval/embeddings.js`](../apps/worker/src/retrieval/embeddings.js)：异步 embedding 任务和缓存。
+- [`apps/worker/src/resources/processor.js`](../apps/worker/src/resources/processor.js)：Raw child 写入 FTS、排入 embedding 任务。
+- [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js)：主检索 API。
+- [`apps/api/src/routes/search.js`](../apps/api/src/routes/search.js)：独立的 legacy Raw FTS API。
+- [`packages/db/src/database/migrations.js`](../packages/db/src/database/migrations.js)：检索派生数据表和 FTS5 表结构。

@@ -1,9 +1,12 @@
+import crypto from "node:crypto";
 import { normalizeCanonicalText } from "./chunker.js";
 
 export const OCR_MODES = Object.freeze(["auto", "off", "force"]);
 export const OCR_PROVIDERS = Object.freeze(["local", "cloud", "paddleocr"]);
 export const OCR_BLOCK_KINDS = Object.freeze(["text", "table", "formula"]);
 export const OCR_CAPABILITIES = Object.freeze(["text", "table", "formula"]);
+
+export const ocrCacheKey = ({ sourceSha256, provider, modelVersion, capabilities }) => crypto.createHash("sha256").update(JSON.stringify({ sourceSha256: String(sourceSha256 || "").toLowerCase(), provider: String(provider || ""), modelVersion: String(modelVersion || ""), capabilities: Object.fromEntries(OCR_CAPABILITIES.map((kind) => [kind, Boolean(capabilities?.[kind])])) })).digest("hex");
 
 const error = (message, code, metadata = {}) => Object.assign(new Error(message), { code, metadata });
 const asString = (value) => typeof value === "string" ? value.trim() : "";

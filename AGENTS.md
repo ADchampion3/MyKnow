@@ -4,9 +4,9 @@ You are a lazy senior developer. Lazy means efficient, not careless. The best co
 
 ## Project phase and change policy
 
-This project is in early development. Prefer a simple, correct model over preserving compatibility with unfinished Sprint 2 behavior. Breaking changes to APIs, schemas, configuration, and derived data are acceptable when they materially improve the design; do not add compatibility shims unless they are explicitly required.
+This project is in early development. Prefer a simple, correct model over preserving compatibility with unfinished behavior. Breaking changes to APIs, schemas, configuration, and derived data are acceptable when they materially improve the design; do not add compatibility shims unless they are explicitly required.
 
-Every breaking change must still leave a reproducible migration or clean empty-database startup path, updated checks, documentation, and recorded evidence. Existing derived data such as chunks, FTS rows, and processing runs may be fully rebuilt. Preserve original materials and audit records unless the user explicitly authorizes their removal.
+Every breaking change must still leave a reproducible migration or clean empty-database startup path and updated documentation. Existing derived data such as chunks, FTS rows, and processing runs may be fully rebuilt. Preserve original materials and audit records unless the user explicitly authorizes their removal.
 
 Before writing code, stop at the first rung that holds:
 
@@ -35,23 +35,10 @@ Apply this ladder after understanding the problem. Read the task and trace the r
 - Handle errors so failures cannot silently lose data.
 - Preserve source data and auditability in the knowledge-base domain.
 - Keep secrets server-side; never put API keys in client bundles, HTML, business records, or ordinary logs.
-- Non-trivial logic must leave one runnable check behind: the smallest focused test or assert-based self-check that fails when the logic breaks.
-- Every Sprint 1 slice needs reproducible evidence under `artifacts/sprint1/`.
-
-## Sprint 1 constraints
-
-- Two weeks, one developer, local-first single-user MVP.
-- Scope: bootable Web/API/Worker processes; Drizzle + SQLite migrations; knowledge-base, space, tag, and task CRUD; database-polled task state machine; mock providers; three-column workspace.
-- Task states: `queued`, `running`, `succeeded`, `failed`, `retrying`.
-- Out of scope: real import, URL fetching, PDF parsing, indexing, RAG, Agent writes, Wiki review/rollback, multi-user collaboration, and production deployment.
-- Use UUID string IDs and UTC timestamps. Validate names at both API and database boundaries.
-- Prefer REST JSON contracts with stable error codes and request IDs.
-- Use database transactions to claim work and append task attempts.
-- Do not physically delete source or audit records; use archive/disable semantics when needed.
 
 ## Definition of done
 
-A change is done only when the relevant automated checks pass, the documented startup or user flow is reproducible from an empty database, and the evidence path is recorded. If a requirement is deferred, record it explicitly in the next Sprint backlog instead of weakening its acceptance threshold.
+A change is done only when the documented startup or user flow is reproducible from an empty database and the relevant documentation is updated. If a requirement is deferred, record it explicitly in the design notes instead of weakening its acceptance threshold.
 
 ## Agent skills
 

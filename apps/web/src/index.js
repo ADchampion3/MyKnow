@@ -1,8 +1,11 @@
 import next from "next";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "@myknow/config";
 const config = loadConfig();
-const app = next({ dev: true, dir: process.cwd() });
+const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const app = next({ dev: true, dir: webRoot });
 const handle = app.getRequestHandler();
 await app.prepare();
 http.createServer((req, res) => handle(req, res)).listen(config.webPort, () => console.log(`Next.js Web listening on http://localhost:${config.webPort}`));

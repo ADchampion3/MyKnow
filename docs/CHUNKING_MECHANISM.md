@@ -2,6 +2,8 @@
 
 > 状态：基于当前代码的实现说明与设计复盘，包含代码块/表格结构保护优化。
 >
+> 审核状态（2026-08-30）：大小坐标、结构保护、统一 metadata、parser 优先和派生数据清理等审核修订已在当前实现中落地；第 10 节仍记录未解决的能力边界。
+>
 > 审核范围：`packages/db/src/chunker.js`、`apps/worker/src/resources/processor.js`、资源导入路由，以及分块结果在数据库和检索索引中的使用方式。
 
 ## 1. 结论先行
@@ -302,7 +304,7 @@ chunk 的资源版本、处理运行和内容范围都被保存，且输出有 d
 
 `parentChunkSize`、`childChunkSize` 和 overlap 仍按 Unicode code point 计算；现在配置显式返回 `sizeUnit=code_point`，并为每个 chunk 记录 code point、UTF-8 byte 和启发式 estimated token 度量。中文、英文、代码、数学公式和不同模型的真实 token 密度仍然不同，因此同一个 `384` 对不同材料的上下文容量并不等价；当前没有把 code point 伪装成模型 token。
 
-检索侧的 token 估算已按 Han、拉丁/数字串、emoji、空白和符号区分，但仍只是预算近似。inline protected range 和结构保护为避免被切开，也可能使实际 chunk 大于普通目标；目标是结构优先的软上限，不是严格 provider token 上限。
+检索侧的 token 估算已按 Han、非 Han 字母/数字串、emoji、空白和符号区分，但仍只是预算近似。inline protected range 和结构保护为避免被切开，也可能使实际 chunk 大于普通目标；目标是结构优先的软上限，不是严格 provider token 上限。
 
 ### 高影响：保护结构仍受最大尺寸约束
 
@@ -316,7 +318,7 @@ Markdown 标题有层级栈，启发式标题只有 section 边界和一行 head
 
 ### 中影响：自动策略阈值是格式启发式，不是语义判断
 
-标题数量、标题密度、分页符和全大写行不能可靠判断文档的语义结构。例如标题很少但段落边界清晰的长文会走 legacy；扫描 PDF 产生的分页符又可能制造过多 section。策略选择没有使用解析器提供的 block 语义作为第一等输入。
+标题数量、标题密度、分页符和全大写行不能可靠判断文档的语义结构。例如标题很少但段落边界清晰的长文仍可能走 legacy；扫描 PDF 产生的分页符又可能制造过多 section。`auto` 在 parser 信息有效时已经优先使用 parser，但 parser 缺失、结构质量不足或启发式特征冲突时，策略选择仍可能偏离文档真实语义。
 
 ### 中影响：重处理身份与旧派生数据需要持续治理
 

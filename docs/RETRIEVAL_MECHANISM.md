@@ -2,6 +2,8 @@
 
 > 状态：基于当前代码的现状文档与设计复盘，不是下一版检索协议。
 >
+> 审核状态（2026-08-30）：输入校验、active run 过滤、provider tokenizer seam、派生数据清理和审计正文隔离等审核修订已在当前实现中落地；第 11、12 节仍明确记录未解决的能力边界和待决策事项。
+>
 > 审核范围：`packages/db/src/retrieval.js`、`packages/db/src/text-tokenizer.js`、`packages/db/src/embeddings.js`、`packages/db/src/derived-cleanup.js`、Wiki/检索 API 路由、Worker 的资源与 embedding 任务，以及相关 SQLite/FTS 表。
 
 ## 1. 结论先行
@@ -280,7 +282,7 @@ Raw seed 的持久化视图会去掉 `content`、parent、header 和 snippet，�
 
 ## 11. 审核发现与边界
 
-以下是当前限制与后续优化边界。
+以下区分“已实现但有明确边界”和“尚未实现或仍需产品/架构决策”的问题；已落地的审核修订见前文及相关代码。
 
 ### 高影响：空间作用域不完整
 
@@ -314,9 +316,9 @@ gate 要求 `keywordRank` 且使用 `keywordScore`，所以向量独有的 Wiki 
 
 Raw 结果包含 locator 和处理运行 ID，但不会在每次检索时重新读取源文件并校验完整性，也没有像 Wiki citation 那样的 block 级引用状态。因此“Raw 可定位”不等于“Raw 已完成独立来源校验”。
 
-### 低影响：旧派生结果需要显式清理
+### 低影响：旧派生结果不会自动清理
 
-重处理后旧 chunk/embedding 不参与 active 查询。现在可以用 `DERIVED_DATA_RETENTION_DAYS` 配置保留天数，并先运行 `npm run db:cleanup-derived -- --dry-run` 查看候选，确认后加 `--confirm` 清理 superseded 或已不再是当前 resource version 的 indexed generation 的 chunks、FTS、旧 embedding 和 canonical artifact，并按同一截止时间清理失败 embedding 与 retrieval trace；仍有 queued/running/retrying embedding task 的 generation 会被跳过，避免任务随后读取不到 chunk；原始资源、resource version、processing run 和 audit log 不会被删除。canonical 存储删除失败时命令以非零状态退出，方便重试。
+重处理后旧 chunk/embedding 不参与 active 查询。清理能力已经实现，但不会自动执行：可以用 `DERIVED_DATA_RETENTION_DAYS` 配置保留天数，并先运行 `npm run db:cleanup-derived -- --dry-run` 查看候选，确认后加 `--confirm` 清理 superseded 或已不再是当前 resource version 的 indexed generation 的 chunks、FTS、旧 embedding 和 canonical artifact，并按同一截止时间清理失败 embedding 与 retrieval trace；仍有 queued/running/retrying embedding task 的 generation 会被跳过，避免任务随后读取不到 chunk；原始资源、resource version、processing run 和 audit log 不会被删除。canonical 存储删除失败时命令以非零状态退出，方便重试。
 
 ## 12. 当前协议与待定事项
 

@@ -2,16 +2,16 @@
 
 > 状态：基于当前代码的现状文档与设计复盘，不是下一版检索协议。
 >
-> 审核范围：`packages/db/src/retrieval.js`、`packages/db/src/text-tokenizer.js`、`packages/db/src/embeddings.js`、Worker 的 embedding 任务、API 检索路由，以及相关 SQLite/FTS 表。
+> 审核范围：`packages/db/src/retrieval.js`、`packages/db/src/text-tokenizer.js`、`packages/db/src/embeddings.js`、`packages/db/src/derived-cleanup.js`、Wiki/检索 API 路由、Worker 的资源与 embedding 任务，以及相关 SQLite/FTS 表。
 
 ## 1. 结论先行
 
-当前检索由两个并行通道组成：
+当前检索由两个相互独立的通道组成（实现上按顺序执行）：
 
 1. **Wiki 通道**：以当前版本的 Wiki page 为对象；
 2. **Raw 通道**：以当前 processing run 的 child chunk 为对象。
 
-两个通道都先做关键词召回；在配置允许时，再做向量召回；随后各通道内部用 RRF（Reciprocal Rank Fusion）融合结果。Wiki 结果还会经过置信度 gate，只有高置信 seed 才能触发最多两跳的 Wiki link graph 扩展。最后系统做 provenance 查询和上下文预算组装，并把整次 retrieval run 保存下来。
+两个通道都先做关键词召回；在配置允许时，再做向量召回；随后各通道内部用 RRF（Reciprocal Rank Fusion）融合结果。Wiki 结果还会经过置信度 gate，只有高置信 seed 才能触发最多两跳的 Wiki link graph 扩展。最后系统做 provenance 查询和上下文预算组装，并把通过请求、知识库和空间校验后进入主流程的 retrieval run 保存下来；API 层在 egress 预检查阶段拒绝请求时不会创建 run。
 
 这套机制覆盖了“精确匹配、语义匹配、知识图谱扩展、来源追踪、上下文限额”几个基本问题，作为本地 MVP baseline 是完整的。但它目前不应被称为“关键词 + 向量 + reranker”：现有的 RRF 是**排名融合**，没有独立的学习型或规则型二次 reranker。
 
@@ -33,7 +33,9 @@ POST /api/retrieval/query
 
 主入口是 [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js) 的 `POST /api/retrieval/query`。底层编排集中在 [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js) 的 `executeRetrieval`。
 
-仓库还保留了 `GET /api/search`。它是一个较低层的 Raw FTS 查询入口，使用自己的空格切词、AND + 前缀匹配和 SQLite FTS rank，不经过下面描述的 tokenizer、向量、RRF、Wiki graph、provenance 和上下文组装。它应被视为独立的 legacy lexical API，而不是主检索流程的一部分。
+请求体必须是对象；`knowledgeBaseId` 和可选的 `spaceId` 必须是 UUID，`query` 在 NFKC 规范化后为 1–200 个字符，`wikiTopK`/`rawTopK` 为 1–20 的整数，`contextBudgetTokens` 为 1–50000 的整数。请求校验失败返回 `VALIDATION_ERROR`，知识库或空间不存在返回 `NOT_FOUND`；这些前置失败不会建立 retrieval run。已保存的 run 可通过 `GET /api/retrieval/runs/:id` 读取。
+
+仓库还保留了 `GET /api/search`。它是一个较低层的 Raw FTS 查询入口，使用自己的空格切词、AND + 前缀匹配和 SQLite FTS rank；查询侧不使用下面描述的 tokenizer，也不经过向量、RRF、Wiki graph、provenance 和上下文组装。它应被视为独立的 legacy lexical API，而不是主检索流程的一部分。
 
 ## 3. 检索对象与过滤边界
 
@@ -74,10 +76,10 @@ API 接受 `knowledgeBaseId` 和可选 `spaceId`，但当前数据库只有 reso
 
 查询先做 NFKC 规范化、转小写和空白折叠。之后：
 
-- 拉丁字母和数字连续串作为 word token；
+- 非 Han 字母和数字连续串作为 word token；
 - 英文停用词会从查询 terms 中移除；
 - Han 字符连续串会生成相邻 bigram，例如 `知识库` 生成 `知识`、`识库`；
-- 最终 terms 是英文 token 与 CJK bigram 的去重集合。
+- 最终 terms 是非 Han word token 与 CJK bigram 的去重集合。
 
 例如：
 
@@ -128,7 +130,7 @@ Raw child 的 embedding 输入是：
 contextHeader（标题路径、表头等结构上下文） + child content
 ```
 
-分块器记录的 `sizeMetrics.estimatedEmbeddingTokens` 与检索的 `estimatedTokens` 默认使用同一个跨语言启发式估算：中文 Han 字符、emoji、拉丁/数字串、空白和符号按不同规则计数。embedding provider 可以通过可选 `tokenizer.countTokens(text)` seam 提供真实 token 数；注入后，分块会额外记录 `provider*Tokens`，检索上下文预算和 trace 也使用该 tokenizer。没有 provider tokenizer 时，`contextBudgetTokens` 的公开含义仍是“估算 token 预算”。
+分块器记录的 `sizeMetrics.estimatedEmbeddingTokens` 与检索的 `estimatedTokens` 默认使用同一个跨语言启发式计数器，但统计的输入不同：前者是 `contextHeader + child content`，后者是最终组装的上下文 item。该计数器会分别处理中文 Han 字符、emoji、非 Han 字母/数字串、空白和符号。embedding provider 可以通过可选 `tokenizer.countTokens(text)` seam 提供真实 token 数；注入后，分块会额外记录 `providerContentTokens`/`providerEmbeddingTokens`，检索上下文预算和 trace 也使用该 tokenizer。没有 provider tokenizer 时，`contextBudgetTokens` 的公开含义仍是“估算 token 预算”。
 
 Wiki page 的 embedding 输入是：
 
@@ -146,11 +148,11 @@ page title + page content
 - `openai` / `openai-compatible`：通过 HTTP embeddings 接口生成真实向量；
 - `none`、`disabled` 或关闭配置：禁用向量召回。
 
-向量以 JSON 数组保存在 `retrieval_embeddings`，没有 ANN/vector index。查询时把符合 provider、model、dimension、版本和 active 条件的向量全部读出，在 JavaScript 中计算 cosine similarity，再取前 200 个。这是一个明确的本地 MVP 复杂度上限，数据规模增大后会变成主要瓶颈。
+向量以 JSON 数组保存在 `retrieval_embeddings`，没有 ANN 索引；现有普通索引只用于 owner/version 等元数据筛选。查询时把符合 provider、model、dimension、版本和 active 条件的向量全部读出，在 JavaScript 中计算 cosine similarity，再取前 200 个。这是一个明确的本地 MVP 复杂度上限，数据规模增大后会变成主要瓶颈。
 
 ### 5.3 故障语义
 
-通常的 embedding 失败会把向量阶段标记为 `disabled` 或 `degraded`，继续使用关键词结果；没有可用向量时也会正常完成关键词检索。显式的 egress 拒绝会直接失败，因为这代表安全策略不允许发出请求，而不是普通召回降级。
+通常的 embedding 失败会把向量阶段标记为 `disabled` 或 `degraded`，继续使用关键词结果；没有可用向量时也会正常完成关键词检索。显式的 egress 拒绝会直接失败，因为这代表安全策略不允许发出请求，而不是普通召回降级；API 的 egress 预检查发生在 `executeRetrieval` 之前，因此这类拒绝不会写入 retrieval run。
 
 ## 6. 通道内融合与排序
 
@@ -171,7 +173,7 @@ rrfScore = 1 / (60 + keywordRank) + 1 / (60 + vectorRank)
 
 未出现在某一路的候选，该路贡献为 0。最终先按 `rrfScore`，再按 `normalizedScore` 和稳定 ID 排序。
 
-注意：`normalizedScore` 在同时命中关键词时保留关键词 score；只有向量命中的候选才把 cosine similarity 从 `[-1, 1]` 线性映射到 `[0, 1]`。因此 `normalizedScore` 不是跨候选、跨通道可比较的统一概率，也不能直接解释为“相关度百分比”。真正的融合顺序是 `rrfScore`。
+注意：`normalizedScore` 在同时命中关键词和向量时保留关键词 score；只有仅命中向量的候选才把 cosine similarity 从 `[-1, 1]` 线性映射到 `[0, 1]`。因此 `normalizedScore` 不是跨候选、跨通道可比较的统一概率，也不能直接解释为“相关度百分比”。真正的融合顺序是 `rrfScore`。
 
 ## 7. Wiki seed gate 与图扩展
 
@@ -188,11 +190,11 @@ Wiki 融合结果不会全部参与图扩展。当前 seed gate 要求：
 | 1 | `0.5 * seedScore` |
 | 2 | `0.25 * seedScore` |
 
-扩展同时考虑出边和入边，只在同一知识库、当前 page version、非系统页和非 archived page 中遍历；每一层最多选择 10 个候选，并记录 `graphPath`、link text 和方向。
+扩展同时考虑出边和入边，只在同一知识库、来源 edge 对应当前 page version、目标有当前 page version、`status` 非 archived 且 `page_type` 不是 `index`/`log` 的页面中遍历；每一层最多选择 10 个候选，并记录 `graphPath`、link text 和方向。
 
 这个设计把“直接命中”和“关系邻居”分开：直接命中必须足够可信，邻居只能以衰减分数进入上下文，避免低置信 query 把整张 Wiki 图带入答案。
 
-但当前 gate 只看关键词证据。一个只有高向量相似度、没有任何关键词命中的 Wiki page，即使进入了融合结果，也不能成为 graph seed。这是一个偏保守的可追溯性策略，但会牺牲语义检索驱动的图扩展能力。
+但当前 gate 只看关键词证据。一个只有高向量相似度、没有任何关键词命中的 Wiki page，即使进入了融合结果，也不能成为 graph seed。这是一个偏保守的可追溯性策略，但会牺牲语义检索驱动的图扩展能力。注意，gate 只决定能否扩图；未通过 gate 的 Wiki 候选仍可能作为主 Wiki 结果进入上下文。
 
 ## 8. Provenance 与上下文组装
 
@@ -216,7 +218,7 @@ Wiki：60%
 Raw ：40%
 ```
 
-Wiki 结果按 seed 后 graph 的顺序加入，同一 page 去重：
+Wiki 主结果（无论 seed gate 是否通过）按融合顺序加入，随后加入 graph 结果；同一 page 去重：
 
 1. 页面足够小则放入全文；
 2. 页面过大则找命中 block，并带上前后相邻 block；
@@ -233,7 +235,7 @@ Raw 结果按排序顺序加入，内容形态是：
 
 超预算时优先保留 child，再尽量补 parent。最终返回 `items`、拼接后的 `markdown`、每个 item 的 locator、估算 token 数以及截断原因。
 
-当前 token 估算按 Han 字符、emoji、连续拉丁/数字串、空白和符号分别处理，不是实际模型 tokenizer。因此没有 provider tokenizer 时预算是工程近似，不是模型 API 的硬保证；它只作为 code point canonical 大小之外的模型侧二级约束。只有 provider 明确提供真实 tokenizer 时，才允许分块配置 `parentTokenTarget`/`childTokenTarget`。
+当前 token 估算按 Han 字符、emoji、连续非 Han 字母/数字串、空白和符号分别处理，不是实际模型 tokenizer。因此没有 provider tokenizer 时预算是工程近似，不是模型 API 的硬保证；它只作为 code point canonical 大小之外的模型侧二级约束。只有 provider 明确提供真实 tokenizer 时，才允许分块配置 `parentTokenTarget`/`childTokenTarget`。
 
 ## 9. Trace 与持久化
 
@@ -250,7 +252,7 @@ Raw 结果按排序顺序加入，内容形态是：
 
 数据库结构见 [`packages/db/src/database/migrations.js`](../packages/db/src/database/migrations.js) 的 `retrieval_embeddings`、`retrieval_runs`、`resource_fts`、`wiki_fts` 和 `wiki_link_edges`。
 
-Raw seed 的持久化视图会去掉 `content`、parent、header 和 snippet，完整文本仍在 `context_items/context_markdown` 中用于本次回放。审计日志只记录计数、状态和向量状态，不直接写入正文。
+Raw seed 的持久化视图会去掉 `content`、parent、header 和 snippet，完整文本仍在 `context_items/context_markdown` 中用于本次回放。检索 API 的审计日志只记录计数、状态和向量状态；embedding 任务审计还会记录 owner/version、provider/model 和输入摘要等元数据，但不直接写入正文。
 
 ## 10. 当前实现符合的原理
 
@@ -306,7 +308,7 @@ gate 要求 `keywordRank` 且使用 `keywordScore`，所以向量独有的 Wiki 
 
 ### 中影响：上下文预算不是模型 tokenizer 预算
 
-固定 60/40 比例简单且可解释，但无法根据问题类型动态调整；没有 provider tokenizer 时，启发式估算即使已区分 Han 字符、拉丁/数字串、空白、emoji 和符号，仍可能与实际 provider 偏差很大。若 provider 提供真实 tokenizer，当前上下文组装会直接使用它做预算校验。
+固定 60/40 比例简单且可解释，但无法根据问题类型动态调整；没有 provider tokenizer 时，启发式估算即使已区分 Han 字符、非 Han 字母/数字串、空白、emoji 和符号，仍可能与实际 provider 偏差很大。若 provider 提供真实 tokenizer，当前上下文组装会直接使用它做预算校验。
 
 ### 中影响：Raw provenance 弱于 Wiki provenance
 
@@ -314,7 +316,7 @@ Raw 结果包含 locator 和处理运行 ID，但不会在每次检索时重新�
 
 ### 低影响：旧派生结果需要显式清理
 
-重处理后旧 chunk/embedding 不参与 active 查询。现在可以用 `DERIVED_DATA_RETENTION_DAYS` 配置保留天数，并先运行 `npm run db:cleanup-derived -- --dry-run` 查看候选，确认后加 `--confirm` 清理 superseded 或已不再是当前 resource version 的 indexed generation 的 chunks、FTS、旧 embedding、retrieval trace 和 canonical artifact；仍有 queued/running/retrying embedding task 的 generation 会被跳过，避免任务随后读取不到 chunk；原始资源、resource version、processing run 和 audit log 不会被删除。canonical 存储删除失败时命令以非零状态退出，方便重试。
+重处理后旧 chunk/embedding 不参与 active 查询。现在可以用 `DERIVED_DATA_RETENTION_DAYS` 配置保留天数，并先运行 `npm run db:cleanup-derived -- --dry-run` 查看候选，确认后加 `--confirm` 清理 superseded 或已不再是当前 resource version 的 indexed generation 的 chunks、FTS、旧 embedding 和 canonical artifact，并按同一截止时间清理失败 embedding 与 retrieval trace；仍有 queued/running/retrying embedding task 的 generation 会被跳过，避免任务随后读取不到 chunk；原始资源、resource version、processing run 和 audit log 不会被删除。canonical 存储删除失败时命令以非零状态退出，方便重试。
 
 ## 12. 当前协议与待定事项
 
@@ -335,10 +337,9 @@ Raw 结果包含 locator 和处理运行 ID，但不会在每次检索时重新�
 ## 13. 相关代码
 
 - [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js)：查询规范化、关键词/向量召回、RRF、seed gate、图扩展、provenance、上下文和 trace。
-- [`packages/db/src/text-tokenizer.js`](../packages/db/src/text-tokenizer.js)：英文 token 与 CJK bigram。
-- [`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)：embedding provider、可选真实 tokenizer seam 和向量校验。
+- [`packages/db/src/text-tokenizer.js`](../packages/db/src/text-tokenizer.js)：非 Han word token 与 CJK bigram。
+- [`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)：embedding provider、tokenizer seam、向量校验、hash mock 和 cosine similarity。
 - [`packages/db/src/derived-cleanup.js`](../packages/db/src/derived-cleanup.js)：派生数据保留计划与显式清理。
-- [`packages/db/src/embeddings.js`](../packages/db/src/embeddings.js)：embedding provider、hash mock、cosine similarity 和输入摘要。
 - [`apps/worker/src/retrieval/embeddings.js`](../apps/worker/src/retrieval/embeddings.js)：异步 embedding 任务和缓存。
 - [`apps/worker/src/resources/processor.js`](../apps/worker/src/resources/processor.js)：Raw child 写入 FTS、排入 embedding 任务。
 - [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js)：主检索 API。

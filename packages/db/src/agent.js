@@ -69,7 +69,7 @@ const normalizeOrganizationMode = (value) => {
 export const normalizePrompt = (value) => {
   if (typeof value !== "string") throw fail("prompt must be a string", "VALIDATION_ERROR");
   const prompt = value.trim();
-  if (!prompt || prompt.length > MAX_PROMPT) throw fail(`prompt must be 1-${MAX_PROMPT} characters`, "VALIDATION_ERROR");
+  if (!prompt || Array.from(prompt).length > MAX_PROMPT) throw fail(`prompt must be 1-${MAX_PROMPT} Unicode code points`, "VALIDATION_ERROR");
   return prompt;
 };
 
@@ -247,7 +247,7 @@ const filteredRetrievalResults = (trace, snapshot) => {
 };
 
 export const searchKnowledge = async ({ sqlite, config, snapshot, query, onAudit = () => {} }) => {
-  const value = normalizePrompt(query).slice(0, 200);
+  const value = normalizePrompt(query);
   const scope = parseScopeSnapshot(snapshot);
   if (!scope.knowledgeBaseId || (!scope.resourceVersions.length && !scope.wikiPages.length && !scope.retrievalRunIds?.length)) throw fail("search requires an explicit scope", "AGENT_SCOPE_INVALID");
   try {

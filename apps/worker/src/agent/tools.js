@@ -34,7 +34,7 @@ export const createAgentTools = ({ sqlite, config, snapshot, holder, kind, audit
       name: "search_knowledge",
       label: "Search MyKnow",
       description: "Search only the explicitly captured MyKnow snapshot and return scoped evidence.",
-      parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 200 }) }),
+      parameters: Type.Object({ query: Type.String({ minLength: 1 }) }),
       execute: (toolCallId, params, signal) => executeRead("search_knowledge", async () => {
         const value = await searchKnowledge({ sqlite, config, snapshot, query: params.query, onAudit: (eventType, trace) => audit(eventType, "retrieval_run", trace.traceId, { status: trace.status, evidenceStatus: trace.raw?.results?.length || trace.wiki?.seeds?.length ? "used" : "no_match" }) });
         onRetrievalRun(value.retrievalRunId);

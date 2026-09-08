@@ -434,7 +434,7 @@ export const normalizeRetrievalRequest = (body = {}) => {
   if (!isUuid(knowledgeBaseId)) throw fail("knowledgeBaseId must be a UUID");
   if (spaceValue !== undefined && spaceId === "") throw fail("spaceId must be a non-empty string");
   if (spaceId !== null && !isUuid(spaceId)) throw fail("spaceId must be a UUID");
-  if (!query || Array.from(query).length > 200) throw fail("query must be 1-200 characters");
+  if (!query || Array.from(query).length > 256) throw fail("query must be 1-256 Unicode code points");
   return { knowledgeBaseId, spaceId, query, wikiTopK: number(body.wikiTopK ?? body.wiki_top_k, RETRIEVAL_DEFAULTS.wikiTopK, "wikiTopK", RETRIEVAL_DEFAULTS.maxTopK), rawTopK: number(body.rawTopK ?? body.raw_top_k, RETRIEVAL_DEFAULTS.rawTopK, "rawTopK", RETRIEVAL_DEFAULTS.maxTopK), contextBudgetTokens: number(body.contextBudgetTokens ?? body.context_budget_tokens, RETRIEVAL_DEFAULTS.contextBudgetTokens, "contextBudgetTokens", RETRIEVAL_DEFAULTS.maxContextBudgetTokens) };
 };
 
@@ -456,7 +456,7 @@ export const retrievalRunView = (row) => {
 
 export const getRetrievalRun = (sqlite, id) => retrievalRunView(sqlite.prepare("SELECT * FROM retrieval_runs WHERE id=?").get(id));
 
-export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => {} }) => {
+export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => {}, signal } = {}) => {
   const request = normalizeRetrievalRequest(input);
   const knowledgeBase = sqlite.prepare("SELECT id FROM knowledge_bases WHERE id=? AND status='active'").get(request.knowledgeBaseId);
   if (!knowledgeBase) throw fail("Knowledge base not found", "NOT_FOUND");
@@ -487,7 +487,7 @@ export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => 
         trace.vector.model = embeddingProvider.model;
         trace.vector.dimensions = embeddingProvider.dimensions;
         trace.vector.tokenizer = embeddingProvider.tokenizer?.name || null;
-        const queryEmbedding = await embeddingProvider.embedText(request.query);
+        const queryEmbedding = await embeddingProvider.embedText(request.query, { signal });
         trace.vector.requestedDimensions = queryEmbedding.requestedDimensions ?? embeddingProvider.dimensions;
         const vectorProvider = { ...embeddingProvider, dimensions: queryEmbedding.dimensions };
         trace.vector.dimensions = queryEmbedding.dimensions;

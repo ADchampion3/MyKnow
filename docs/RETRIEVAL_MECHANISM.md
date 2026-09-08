@@ -35,9 +35,9 @@ POST /api/retrieval/query
 
 主入口是 [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js) 的 `POST /api/retrieval/query`。底层编排集中在 [`packages/db/src/retrieval.js`](../packages/db/src/retrieval.js) 的 `executeRetrieval`。
 
-请求体必须是对象；`knowledgeBaseId` 和可选的 `spaceId` 必须是 UUID，`query` 在 NFKC 规范化后为 1–200 个字符，`wikiTopK`/`rawTopK` 为 1–20 的整数，`contextBudgetTokens` 为 1–50000 的整数。请求校验失败返回 `VALIDATION_ERROR`，知识库或空间不存在返回 `NOT_FOUND`；这些前置失败不会建立 retrieval run。已保存的 run 可通过 `GET /api/retrieval/runs/:id` 读取。
+请求体必须是对象；`knowledgeBaseId` 和可选的 `spaceId` 必须是 UUID，`query` 在 NFKC 规范化后为 1–256 个 Unicode code points，`wikiTopK`/`rawTopK` 为 1–20 的整数，`contextBudgetTokens` 为 1–50000 的整数。请求校验失败返回 `VALIDATION_ERROR`，知识库或空间不存在返回 `NOT_FOUND`；这些前置失败不会建立 retrieval run。已保存的 run 可通过 `GET /api/retrieval/runs/:id` 读取。
 
-仓库还保留了 `GET /api/search`。它是一个较低层的 Raw FTS 查询入口，使用自己的空格切词、AND + 前缀匹配和 SQLite FTS rank；查询侧不使用下面描述的 tokenizer，也不经过向量、RRF、Wiki graph、provenance 和上下文组装。它应被视为独立的 legacy lexical API，而不是主检索流程的一部分。
+`retrieval_runs.query` 的 SQLite 约束随 schema version `retrieval-query-256-v1` 扩展到 256 个 Unicode code points。正常启动会把旧的 `sprint6-personal-acceptance-v1` 表迁移到新约束并保留原有行、索引和关联；空数据库仍走完整建表路径。
 
 ## 3. 检索对象与过滤边界
 
@@ -300,10 +300,6 @@ RRF 只使用两个召回排名，不能判断一个候选是否完整回答问�
 
 gate 要求 `keywordRank` 且使用 `keywordScore`，所以向量独有的 Wiki 命中不能触发图扩展。这样可避免纯语义误扩散，但会让图检索依赖词面重叠；是否允许高置信向量 seed 应成为显式策略，而不是由当前实现隐含决定。
 
-### 中影响：存在两条不一致的查询路径
-
-`/api/retrieval/query` 使用共享 tokenizer、混合召回、RRF、graph、provenance 和 context assembly；`/api/search` 使用另一套 FTS 查询。两者对中文、前缀、AND/OR、排序、作用域和返回形态的解释不同，后续容易出现“同一个问题在搜索框和 Agent 中得到不同结果”的维护成本。
-
 ### 中影响：分数没有统一标尺
 
 关键词 score 是 term 覆盖规则，向量 score 是 cosine similarity，RRF 是 rank 分数。当前排序是可用的，但任何 UI 进度条或业务阈值都不应直接把 `normalizedScore` 当成概率。seed gate 也只适用于当前这套关键词规则，不能自动迁移到新的 scorer。
@@ -326,14 +322,13 @@ Raw 结果包含 locator 和处理运行 ID，但不会在每次检索时重新�
 
 仍待单独决定、且不改变上述分块协议的事项：
 
-1. 检索的唯一公开契约是什么，是否保留 `/api/search`，还是让它成为主检索的简化视图？
-2. space 是否覆盖 Raw resource，还是明确规定 space 只组织 Wiki？
-3. 关键词召回要继续使用 CJK bigram，还是引入可替换的语言 tokenizer/BM25 实现？
-4. 向量后端的规模上限是多少，何时从全表扫描切换到 ANN？
-5. RRF 后是否需要独立 reranker；如果需要，重排的是 Wiki page、Raw child，还是统一候选？
-6. 向量独有结果能否成为 Wiki seed，gate 应基于关键词、向量、融合排名还是证据完整性？
-7. Raw 和 Wiki 是否需要统一的 citation/provenance 对象，以便 Agent 只消费一种来源协议？
-8. 旧版本 embedding 和 retrieval trace 的保留周期由 `DERIVED_DATA_RETENTION_DAYS` 控制，默认 30 天；实际清理通过显式命令执行。
+1. space 是否覆盖 Raw resource，还是明确规定 space 只组织 Wiki？
+2. 关键词召回要继续使用 CJK bigram，还是引入可替换的语言 tokenizer/BM25 实现？
+3. 向量后端的规模上限是多少，何时从全表扫描切换到 ANN？
+4. RRF 后是否需要独立 reranker；如果需要，重排的是 Wiki page、Raw child，还是统一候选？
+5. 向量独有结果能否成为 Wiki seed，gate 应基于关键词、向量、融合排名还是证据完整性？
+6. Raw 和 Wiki 是否需要统一的 citation/provenance 对象，以便 Agent 只消费一种来源协议？
+7. 旧版本 embedding 和 retrieval trace 的保留周期由 `DERIVED_DATA_RETENTION_DAYS` 控制，默认 30 天；实际清理通过显式命令执行。
 
 
 ## 13. 相关代码
@@ -345,5 +340,4 @@ Raw 结果包含 locator 和处理运行 ID，但不会在每次检索时重新�
 - [`apps/worker/src/retrieval/embeddings.js`](../apps/worker/src/retrieval/embeddings.js)：异步 embedding 任务和缓存。
 - [`apps/worker/src/resources/processor.js`](../apps/worker/src/resources/processor.js)：Raw child 写入 FTS、排入 embedding 任务。
 - [`apps/api/src/routes/retrieval.js`](../apps/api/src/routes/retrieval.js)：主检索 API。
-- [`apps/api/src/routes/search.js`](../apps/api/src/routes/search.js)：独立的 legacy Raw FTS API。
 - [`packages/db/src/database/migrations.js`](../packages/db/src/database/migrations.js)：检索派生数据表和 FTS5 表结构。

@@ -5,5 +5,10 @@ node_modules/
 .venv-pdf/
 .next/
 data/
+!evals/
+!evals/raw-hybrid-retrieval/
+!evals/raw-hybrid-retrieval/data/
+evals/raw-hybrid-retrieval/data/*
+!evals/raw-hybrid-retrieval/data/manifest.json
 .manual-sprint4/
 apps/*/data/

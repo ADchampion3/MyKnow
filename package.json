@@ -11,7 +11,15 @@
     "dev:api": "npm --workspace apps/api run dev",
     "dev:worker": "npm --workspace apps/worker run dev",
     "db:recreate": "node scripts/recreate-db.js",
-    "db:cleanup-derived": "node scripts/cleanup-derived-data.js"
+    "db:cleanup-derived": "node scripts/cleanup-derived-data.js",
+    "test": "vitest run",
+    "eval:scifact:import": "node scripts/import-scifact.js",
+    "eval:raw-hybrid:preflight": "node scripts/prepare-raw-hybrid-eval-embeddings.js --preflight",
+    "eval:raw-hybrid:prepare": "node scripts/prepare-raw-hybrid-eval-embeddings.js",
+    "eval:raw-hybrid": "vitest run --config evals/raw-hybrid-retrieval/vitest.config.js",
+    "eval:raw-hybrid:preflight:configured": "node scripts/prepare-raw-hybrid-eval-embeddings.js --preflight",
+    "eval:raw-hybrid:prepare:configured": "node scripts/prepare-raw-hybrid-eval-embeddings.js",
+    "eval:raw-hybrid:configured": "vitest run --config evals/raw-hybrid-retrieval/vitest.config.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.2.1",
@@ -24,5 +32,10 @@
     "react-dom": "^19.2.8",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@sentry/node": "^10.72.0",
+    "deepeval": "^0.9.13",
+    "vitest": "^4.1.11"
   }
 }

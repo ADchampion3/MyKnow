@@ -1,4 +1,5 @@
-const SCHEMA_VERSION = "sprint6-personal-acceptance-v1";
+const SCHEMA_VERSION = "retrieval-query-256-v1";
+const QUERY_PREVIOUS_SCHEMA_VERSION = "sprint6-personal-acceptance-v1";
 const PREVIOUS_SCHEMA_VERSION = "sprint5-agent-tree-v1";
 const LEGACY_PREVIOUS_SCHEMA_VERSION = "sprint5-agent-review-v1";
 
@@ -57,7 +58,7 @@ CREATE TABLE retrieval_embeddings (id TEXT PRIMARY KEY, owner_type TEXT NOT NULL
 CREATE INDEX retrieval_embeddings_wiki_idx ON retrieval_embeddings(owner_type, page_version_id, status);
 CREATE INDEX retrieval_embeddings_raw_idx ON retrieval_embeddings(owner_type, resource_version_id, status);
 CREATE INDEX retrieval_embeddings_input_idx ON retrieval_embeddings(owner_type, input_sha256, provider, model, dimensions, status);
-CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, query TEXT NOT NULL CHECK(length(trim(query)) BETWEEN 1 AND 200), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), wiki_top_k INTEGER NOT NULL CHECK(wiki_top_k BETWEEN 1 AND 20), raw_top_k INTEGER NOT NULL CHECK(raw_top_k BETWEEN 1 AND 20), context_budget_tokens INTEGER NOT NULL CHECK(context_budget_tokens BETWEEN 1 AND 50000), wiki_budget_tokens INTEGER NOT NULL CHECK(wiki_budget_tokens >= 0), raw_budget_tokens INTEGER NOT NULL CHECK(raw_budget_tokens >= 0), vector_enabled INTEGER NOT NULL DEFAULT 0 CHECK(vector_enabled IN (0,1)), vector_provider TEXT, vector_model TEXT, status TEXT NOT NULL DEFAULT 'succeeded' CHECK(status IN ('succeeded','failed')), wiki_seeds TEXT NOT NULL, raw_seeds TEXT NOT NULL, graph_expansion TEXT NOT NULL, provenance_lookups TEXT NOT NULL, context_items TEXT NOT NULL, context_markdown TEXT NOT NULL, metrics TEXT NOT NULL, vector_status TEXT NOT NULL, trace_json TEXT NOT NULL, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, query TEXT NOT NULL CHECK(length(trim(query)) BETWEEN 1 AND 256), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), wiki_top_k INTEGER NOT NULL CHECK(wiki_top_k BETWEEN 1 AND 20), raw_top_k INTEGER NOT NULL CHECK(raw_top_k BETWEEN 1 AND 20), context_budget_tokens INTEGER NOT NULL CHECK(context_budget_tokens BETWEEN 1 AND 50000), wiki_budget_tokens INTEGER NOT NULL CHECK(wiki_budget_tokens >= 0), raw_budget_tokens INTEGER NOT NULL CHECK(raw_budget_tokens >= 0), vector_enabled INTEGER NOT NULL DEFAULT 0 CHECK(vector_enabled IN (0,1)), vector_provider TEXT, vector_model TEXT, status TEXT NOT NULL DEFAULT 'succeeded' CHECK(status IN ('succeeded','failed')), wiki_seeds TEXT NOT NULL, raw_seeds TEXT NOT NULL, graph_expansion TEXT NOT NULL, provenance_lookups TEXT NOT NULL, context_items TEXT NOT NULL, context_markdown TEXT NOT NULL, metrics TEXT NOT NULL, vector_status TEXT NOT NULL, trace_json TEXT NOT NULL, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);
 CREATE TABLE agent_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), run_kind TEXT NOT NULL CHECK(run_kind IN ('answer','organize')), knowledge_base_id TEXT REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), scope_snapshot TEXT NOT NULL, prompt_text TEXT NOT NULL CHECK(length(prompt_text) BETWEEN 1 AND 4000), prompt_hash TEXT NOT NULL CHECK(length(prompt_hash)=64), prompt_version TEXT NOT NULL, contract_version TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, egress_mode TEXT NOT NULL CHECK(egress_mode IN ('local_only','allow_cloud')), status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','retrying','succeeded','failed','cancelled')), metrics TEXT NOT NULL DEFAULT '{}', result_json TEXT, error_code TEXT, error_summary TEXT, idempotency_key TEXT UNIQUE, request_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX agent_runs_status_idx ON agent_runs(status, created_at, id);
@@ -84,10 +85,13 @@ export function migrate(sqlite) {
   if (existing) {
     const hasMeta = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'").get();
     const marker = hasMeta ? sqlite.prepare("SELECT value FROM schema_meta WHERE key='schema_version'").get() : null;
-    if ([PREVIOUS_SCHEMA_VERSION, LEGACY_PREVIOUS_SCHEMA_VERSION].includes(marker?.value)) {
+    if ([QUERY_PREVIOUS_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION, LEGACY_PREVIOUS_SCHEMA_VERSION].includes(marker?.value)) {
       sqlite.transaction(() => {
         if (marker.value === LEGACY_PREVIOUS_SCHEMA_VERSION) sqlite.exec(treeMigration);
-        sqlite.exec(personalMigration);
+        if (marker.value !== QUERY_PREVIOUS_SCHEMA_VERSION) sqlite.exec(personalMigration);
+        const tableSql = migration.match(/CREATE TABLE retrieval_runs .*?;/u)[0];
+        sqlite.exec(tableSql.replace("CREATE TABLE retrieval_runs", "CREATE TABLE retrieval_runs_new"));
+        sqlite.exec("INSERT INTO retrieval_runs_new SELECT * FROM retrieval_runs; DROP TABLE retrieval_runs; ALTER TABLE retrieval_runs_new RENAME TO retrieval_runs; CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);");
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='derived_schema'").run("sprint6-personal-derived-ready", timestamp);
       })();

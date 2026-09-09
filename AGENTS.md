@@ -27,6 +27,7 @@ Apply this ladder after understanding the problem. Read the task and trace the r
 - Prefer deletion over addition and the smallest working diff.
 - Question complex requests: determine whether a smaller existing capability covers them.
 - Fix shared root causes. Inspect every caller of a function before changing it.
+- For bug fixes, trace the root cause from the reported evidence and project code first. Treat reproduction as a later verification step unless the user explicitly asks for reproduction before the fix.
 - Mark deliberate simplifications with a `ponytail:` comment naming the ceiling and upgrade path. Use this for known tradeoffs such as a global lock, polling, or an O(n^2) scan.
 
 ## Required quality bars

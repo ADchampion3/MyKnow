@@ -30,6 +30,7 @@ const hash = (value) => crypto.createHash("sha256").update(JSON.stringify(value)
 const object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const scopeBody = (body) => object(body?.scope || body);
 const stableScope = (snapshot) => { const { createdAt, ...rest } = scopeView(snapshot); return rest; };
+const citationPolicyFor = (config, kind) => kind === "organize" ? config.agentCitationPolicy || "warn" : "required";
 const scopeFieldPresent = (value) => ["knowledgeBaseId", "knowledge_base_id", "spaceId", "space_id", "resourceVersionIds", "resource_version_ids", "wikiPageIds", "wiki_page_ids", "retrievalRunId", "retrieval_run_id", "organizationMode", "organization_mode", "mountPageId", "mount_page_id"].some((key) => Object.hasOwn(value, key));
 const parse = (value, fallback = {}) => { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } };
 const limitIdempotency = (key) => {
@@ -53,10 +54,11 @@ const createRun = (ctx, request, kind, prompt, snapshot, fingerprint) => {
   const runId = crypto.randomUUID();
   const taskId = crypto.randomUUID();
   const timestamp = now();
+  const citationPolicy = citationPolicyFor(config, kind);
   sqlite.transaction(() => {
     sqlite.prepare("INSERT INTO tasks (id,type,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,'queued',0,3,0,?,?)").run(taskId, `agent:${kind}`, JSON.stringify({ agentRunId: runId }), timestamp, timestamp);
-    sqlite.prepare("INSERT INTO agent_runs (id,task_id,run_kind,knowledge_base_id,space_id,scope_snapshot,prompt_text,prompt_hash,prompt_version,contract_version,provider,model,egress_mode,status,metrics,result_json,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','{}',NULL,?,?,?,?)").run(runId, taskId, kind, snapshot.knowledgeBaseId, snapshot.spaceId, JSON.stringify(snapshot), prompt, hash(prompt), AGENT_PROMPT_VERSION, kind === "organize" ? PLAN_CONTRACT_VERSION : ANSWER_CONTRACT_VERSION, config.modelProvider, config.modelName, config.aiEgressMode, idempotencyKey, fingerprint, timestamp, timestamp);
-    ctx.audit("queued", "agent_run", runId, request.requestId, { runKind: kind, taskId, scope: scopeView(snapshot) });
+    sqlite.prepare("INSERT INTO agent_runs (id,task_id,run_kind,knowledge_base_id,space_id,scope_snapshot,prompt_text,prompt_hash,prompt_version,contract_version,provider,model,egress_mode,citation_policy,status,metrics,result_json,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','{}',NULL,?,?,?,?)").run(runId, taskId, kind, snapshot.knowledgeBaseId, snapshot.spaceId, JSON.stringify(snapshot), prompt, hash(prompt), AGENT_PROMPT_VERSION, kind === "organize" ? PLAN_CONTRACT_VERSION : ANSWER_CONTRACT_VERSION, config.modelProvider, config.modelName, config.aiEgressMode, citationPolicy, idempotencyKey, fingerprint, timestamp, timestamp);
+    ctx.audit("queued", "agent_run", runId, request.requestId, { runKind: kind, taskId, citationPolicy, scope: scopeView(snapshot) });
   })();
   return { status: 202, idempotent: false, run: getAgentRun(sqlite, runId), task: stableTaskView(ctx, taskId) };
 };
@@ -83,7 +85,7 @@ const createChatMessage = (ctx, request, session, content, snapshot, fingerprint
   const timestamp = now();
   sqlite.transaction(() => {
     sqlite.prepare("INSERT INTO tasks (id,type,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,'queued',0,3,0,?,?)").run(taskId, "agent:answer", JSON.stringify({ agentRunId: runId }), timestamp, timestamp);
-    sqlite.prepare("INSERT INTO agent_runs (id,task_id,run_kind,knowledge_base_id,space_id,scope_snapshot,prompt_text,prompt_hash,prompt_version,contract_version,provider,model,egress_mode,status,metrics,result_json,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','{}',NULL,?,?,?)").run(runId, taskId, "answer", snapshot.knowledgeBaseId, snapshot.spaceId, JSON.stringify(snapshot), content, hash(content), AGENT_PROMPT_VERSION, ANSWER_CONTRACT_VERSION, config.modelProvider, config.modelName, config.aiEgressMode, fingerprint, timestamp, timestamp);
+    sqlite.prepare("INSERT INTO agent_runs (id,task_id,run_kind,knowledge_base_id,space_id,scope_snapshot,prompt_text,prompt_hash,prompt_version,contract_version,provider,model,egress_mode,citation_policy,status,metrics,result_json,request_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','{}',NULL,?,?,?)").run(runId, taskId, "answer", snapshot.knowledgeBaseId, snapshot.spaceId, JSON.stringify(snapshot), content, hash(content), AGENT_PROMPT_VERSION, ANSWER_CONTRACT_VERSION, config.modelProvider, config.modelName, config.aiEgressMode, "required", fingerprint, timestamp, timestamp);
     sqlite.prepare("INSERT INTO chat_messages (id,session_id,role,content,status,agent_run_id,task_id,retrieval_run_ids,answer_json,idempotency_key,request_fingerprint,created_at,updated_at) VALUES (?,?, 'user',?,'succeeded',NULL,NULL,'[]',NULL,?,?,?,?)").run(userMessageId, session.id, content, request.idempotencyKey, fingerprint, timestamp, timestamp);
     sqlite.prepare("INSERT INTO chat_messages (id,session_id,role,content,status,agent_run_id,task_id,retrieval_run_ids,answer_json,created_at,updated_at) VALUES (?,?, 'assistant','', 'pending',?,?, '[]',NULL,?,?)").run(assistantMessageId, session.id, runId, taskId, timestamp, timestamp);
     sqlite.prepare("UPDATE chat_sessions SET updated_at=? WHERE id=?").run(timestamp, session.id);
@@ -94,7 +96,7 @@ const createChatMessage = (ctx, request, session, content, snapshot, fingerprint
 
 export const handleAgentRoutes = ({ ctx, request }) => {
   const { pathname, method, body, requestId, res } = request;
-  const { sqlite } = ctx;
+  const { sqlite, config } = ctx;
 
   if (pathname === "/api/agent/runs" && method === "POST") {
     ctx.assertModelEgress();
@@ -103,7 +105,7 @@ export const handleAgentRoutes = ({ ctx, request }) => {
     const prompt = normalizePrompt(body?.prompt);
     const rawScope = scopeBody(body);
     const snapshot = createScopeSnapshot(sqlite, { ...rawScope, organizationMode: body?.organizationMode ?? body?.organization_mode ?? body?.mode ?? (body?.tree === true ? "tree" : rawScope.organizationMode), mountPageId: body?.mountPageId ?? body?.mount_page_id ?? rawScope.mountPageId }, { allowEmpty: false, requireExplicit: true });
-    const fingerprint = hash({ kind, prompt, scope: stableScope(snapshot) });
+    const fingerprint = hash({ kind, prompt, citationPolicy: citationPolicyFor(config, kind), scope: stableScope(snapshot) });
     const created = createRun(ctx, request, kind, prompt, snapshot, fingerprint);
     ctx.json(res, created.status, { agentRun: created.run, task: created.task, idempotent: created.idempotent }, null, requestId);
     return true;
@@ -113,7 +115,7 @@ export const handleAgentRoutes = ({ ctx, request }) => {
   if (planMatch && method === "GET") {
     const run = getAgentRun(sqlite, planMatch[1]);
     if (!run) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Agent run not found"), requestId); return true; }
-    ctx.json(res, 200, { items: getAgentPlan(sqlite, planMatch[1]), tree: getAgentPlanTree(sqlite, planMatch[1]), planStatus: agentPlanStatus(sqlite, planMatch[1]), organizationMode: run.organizationMode, mountPageId: run.mountPageId }, null, requestId);
+    ctx.json(res, 200, { items: getAgentPlan(sqlite, planMatch[1]), tree: getAgentPlanTree(sqlite, planMatch[1]), planStatus: agentPlanStatus(sqlite, planMatch[1]), citationPolicy: run.citationPolicy, organizationMode: run.organizationMode, mountPageId: run.mountPageId }, null, requestId);
     return true;
   }
   const eventsMatch = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/events$/);

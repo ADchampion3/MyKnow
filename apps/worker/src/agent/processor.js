@@ -38,6 +38,7 @@ export const createAgentTaskProcessor = ({ config, sqlite, audit = () => {} }) =
   const run = sqlite.prepare("SELECT * FROM agent_runs WHERE id=?").get(payload.agentRunId);
   if (!run) throw Object.assign(new Error("agent run was not found"), { code: "VALIDATION_ERROR" });
   const snapshot = parse(run.scope_snapshot);
+  const citationPolicy = run.citation_policy || "required";
   const holder = { value: null };
   const retrievalRunIds = new Set();
   const event = (input) => {
@@ -51,6 +52,7 @@ export const createAgentTaskProcessor = ({ config, sqlite, audit = () => {} }) =
     snapshot,
     holder,
     kind: run.run_kind,
+    citationPolicy,
     audit: (eventType, entityType, entityId, metadata) => audit(eventType, entityType, entityId, metadata),
     onRetrievalRun: (id) => { if (id) retrievalRunIds.add(id); }
   });
@@ -59,7 +61,7 @@ export const createAgentTaskProcessor = ({ config, sqlite, audit = () => {} }) =
     kind: run.run_kind,
     snapshot,
     tools,
-    systemPrompt: run.run_kind === "organize" ? organizeSystemPrompt(snapshot) : answerSystemPrompt(snapshot),
+    systemPrompt: run.run_kind === "organize" ? organizeSystemPrompt(snapshot, citationPolicy) : answerSystemPrompt(snapshot),
     onEvent: (received) => {
       if (received.type === "turn_start") turnCount += 1;
       if (received.type === "tool_execution_start" || received.type === "tool_execution_end") toolCount += received.type === "tool_execution_start" ? 1 : 0;
@@ -88,7 +90,7 @@ export const createAgentTaskProcessor = ({ config, sqlite, audit = () => {} }) =
     const result = await runtime.run(prompt, task.signal);
     if (!holder.value) throw Object.assign(new Error(holder.error?.message || "agent finished without a terminal submission"), { code: holder.error?.code || "AGENT_OUTPUT_INVALID" });
     const usage = usageFor(result.state.messages);
-    const metrics = { completedAt: now(), turns: result.turns, toolCalls: result.toolCalls, usage };
+    const metrics = { completedAt: now(), turns: result.turns, toolCalls: result.toolCalls, usage, citationPolicy, citationWarningCount: run.run_kind === "organize" ? holder.value.warningCount || 0 : 0 };
     if (run.run_kind === "answer") {
       const answerMessage = sqlite.prepare("SELECT id FROM chat_messages WHERE agent_run_id=? AND role='assistant' LIMIT 1").get(run.id);
       if (answerMessage) sqlite.prepare("UPDATE chat_messages SET content=?,status='succeeded',retrieval_run_ids=?,answer_json=?,error_code=NULL,error_summary=NULL,updated_at=? WHERE id=?").run(holder.value.answerMarkdown, JSON.stringify([...retrievalRunIds]), JSON.stringify(holder.value), now(), answerMessage.id);
@@ -97,7 +99,7 @@ export const createAgentTaskProcessor = ({ config, sqlite, audit = () => {} }) =
       insertAgentPlanItems(sqlite, run.id, holder.value);
     }
     updateAgentRun(sqlite, run.id, { status: "succeeded", metrics });
-    audit("succeeded", "agent_run", run.id, { runKind: run.run_kind, turns: result.turns, toolCalls: result.toolCalls, retrievalRunCount: retrievalRunIds.size });
+    audit("succeeded", "agent_run", run.id, { runKind: run.run_kind, turns: result.turns, toolCalls: result.toolCalls, retrievalRunCount: retrievalRunIds.size, citationPolicy, citationWarningCount: metrics.citationWarningCount });
     event({ eventType: "agent_end", stage: "agent" });
   } catch (caught) {
     const code = typeof caught?.code === "string" ? caught.code : "PROVIDER_FAILED";

@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "dev": "node scripts/dev.js",
     "dev:web": "npm --workspace apps/web run dev",
     "dev:api": "npm --workspace apps/api run dev",
     "dev:worker": "npm --workspace apps/worker run dev",

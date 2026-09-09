@@ -15,9 +15,10 @@ import {
 } from "./wiki.js";
 
 export const AGENT_SCOPE_VERSION = "scope-snapshot-v1";
-export const AGENT_PROMPT_VERSION = "sprint5-agent-prompt-v2";
+export const AGENT_PROMPT_VERSION = "sprint5-agent-prompt-v3";
 export const ANSWER_CONTRACT_VERSION = "agent-answer-v1";
-export const PLAN_CONTRACT_VERSION = "agent-change-plan-tree-v1";
+export const PLAN_CONTRACT_VERSION = "agent-change-plan-tree-v2";
+export const AGENT_CITATION_POLICIES = Object.freeze(["required", "warn"]);
 export const AGENT_ORGANIZATION_MODES = Object.freeze(["legacy", "tree"]);
 export const AGENT_TREE_LIMITS = Object.freeze({ maxDepth: 4, maxPages: 50, maxChildren: 8 });
 export const AGENT_READ_TOOL_NAMES = Object.freeze([
@@ -64,6 +65,11 @@ const normalizeOrganizationMode = (value) => {
   const mode = value === undefined || value === null || value === "" ? "legacy" : String(value).trim().toLowerCase();
   if (!AGENT_ORGANIZATION_MODES.includes(mode)) throw fail("organizationMode must be legacy or tree", "AGENT_SCOPE_INVALID");
   return mode;
+};
+const normalizeCitationPolicy = (value) => {
+  const policy = value === undefined || value === null || value === "" ? "required" : String(value).trim().toLowerCase();
+  if (!AGENT_CITATION_POLICIES.includes(policy)) throw fail("citationPolicy must be required or warn", "AGENT_PLAN_INVALID");
+  return policy;
 };
 
 export const normalizePrompt = (value) => {
@@ -302,6 +308,38 @@ const citationFor = (sqlite, config, snapshot, input, contentMarkdown = "") => {
   return { resourceVersionId: null, wikiPageVersionId, sourceBlockKey, locator: null, blockKey };
 };
 
+const citationWarning = (caught, citationIndex = null) => ({
+  code: "AGENT_CITATION_INVALID",
+  citationIndex,
+  message: String(caught?.message || "citation could not be verified").replace(/\s+/gu, " ").trim().slice(0, 500)
+});
+
+const missingCitationWarning = () => ({
+  code: "AGENT_CITATION_MISSING",
+  citationIndex: null,
+  message: "plan item has no verified citations"
+});
+
+const normalizePlanCitations = (sqlite, config, snapshot, rawCitations, contentMarkdown, itemType, citationPolicy) => {
+  const citations = [];
+  const validationWarnings = [];
+  for (const [citationIndex, citation] of rawCitations.entries()) {
+    try {
+      citations.push(citationFor(sqlite, config, snapshot, citation, contentMarkdown));
+    } catch (caught) {
+      if (citationPolicy !== "warn") throw caught;
+      validationWarnings.push(citationWarning(caught, citationIndex));
+    }
+  }
+  if (citationPolicy === "warn" && itemType !== "tag_add" && !citations.length) validationWarnings.push(missingCitationWarning());
+  const evidenceStatus = itemType === "tag_add"
+    ? "not_applicable"
+    : validationWarnings.length
+      ? citationPolicy === "warn" ? "unverified" : "needs_evidence"
+      : citations.length ? "used" : "needs_evidence";
+  return { citations, validationWarnings, evidenceStatus };
+};
+
 export const validateAnswerOutput = (sqlite, config, snapshot, output) => {
   if (!output || typeof output !== "object" || Array.isArray(output)) throw fail("submit_answer payload must be an object", "AGENT_OUTPUT_INVALID");
   const answerMarkdown = text(output.answerMarkdown, "answerMarkdown", 100_000);
@@ -421,9 +459,10 @@ const tagFor = (sqlite, kbId, proposed) => {
   return { tagId: existing.id, tagName: existing.name };
 };
 
-export const validatePlanOutput = (sqlite, config, snapshot, output) => {
+export const validatePlanOutput = (sqlite, config, snapshot, output, { citationPolicy = "required" } = {}) => {
   if (!output || typeof output !== "object" || Array.isArray(output) || !Array.isArray(output.items)) throw fail("submit_change_plan payload must contain items", "AGENT_OUTPUT_INVALID");
   if (output.items.length > MAX_PLAN_ITEMS) throw fail(`a change plan may contain at most ${MAX_PLAN_ITEMS} items`, "AGENT_OUTPUT_INVALID");
+  citationPolicy = normalizeCitationPolicy(citationPolicy);
   const scope = parseScopeSnapshot(snapshot);
   if (!scope.knowledgeBaseId) throw fail("change plans require a knowledge base", "AGENT_OUTPUT_INVALID");
   const items = output.items.map((input, ordinal) => {
@@ -455,8 +494,7 @@ export const validatePlanOutput = (sqlite, config, snapshot, output) => {
     } else basePageVersionId = null;
     const rawCitations = input.citations === undefined ? [] : input.citations;
     if (!Array.isArray(rawCitations) || rawCitations.length > MAX_CITATIONS) throw fail("plan citations are invalid", "AGENT_OUTPUT_INVALID");
-    const citations = rawCitations.map((citation) => citationFor(sqlite, config, snapshot, citation, proposed.contentMarkdown || ""));
-    const evidenceStatus = citations.length ? "used" : ["tag_add"].includes(itemType) ? "not_applicable" : "needs_evidence";
+    const { citations, validationWarnings, evidenceStatus } = normalizePlanCitations(sqlite, config, snapshot, rawCitations, proposed.contentMarkdown || "", itemType, citationPolicy);
     const risk = itemType === "tag_add" ? "low" : itemType === "page_create" ? "medium" : "high";
     const diff = itemType === "page_update" ? (() => {
       const base = sqlite.prepare("SELECT content_markdown FROM wiki_page_versions WHERE id=? AND page_id=?").get(basePageVersionId, targetPageId);
@@ -473,26 +511,27 @@ export const validatePlanOutput = (sqlite, config, snapshot, output) => {
       diff,
       risk,
       evidenceStatus,
+      validationWarnings,
       ...(scope.organizationMode === "tree" && ["page_create", "page_update"].includes(itemType) ? { nodeId: proposed.nodeId, parentNodeId: proposed.parentNodeId, nodeRole: proposed.nodeRole } : {})
     };
   });
   if (scope.organizationMode === "tree") validateTreeNodes(items, scope);
-  return { items };
+  return { items, warningCount: items.reduce((count, item) => count + item.validationWarnings.length, 0) };
 };
 
 export const insertAgentPlanItems = (sqlite, runId, plan) => {
   const timestamp = now();
-  const insert = sqlite.prepare("INSERT INTO agent_plan_items (id,run_id,ordinal,item_type,target_page_id,base_page_version_id,proposed_json,citations_json,diff_json,risk,evidence_status,review_status,application_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'proposed','pending',?,?)");
+  const insert = sqlite.prepare("INSERT INTO agent_plan_items (id,run_id,ordinal,item_type,target_page_id,base_page_version_id,proposed_json,citations_json,diff_json,risk,evidence_status,validation_warnings,review_status,application_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'proposed','pending',?,?)");
   return plan.items.map((item) => {
     const id = crypto.randomUUID();
-    insert.run(id, runId, item.ordinal, item.itemType, item.targetPageId, item.basePageVersionId, JSON.stringify(item.proposed), JSON.stringify(item.citations), item.diff ? JSON.stringify(item.diff) : null, item.risk, item.evidenceStatus, timestamp, timestamp);
+    insert.run(id, runId, item.ordinal, item.itemType, item.targetPageId, item.basePageVersionId, JSON.stringify(item.proposed), JSON.stringify(item.citations), item.diff ? JSON.stringify(item.diff) : null, item.risk, item.evidenceStatus, JSON.stringify(item.validationWarnings || []), timestamp, timestamp);
     return id;
   });
 };
 
 const runView = (row) => row ? (() => {
   const scope = scopeView(row.scope_snapshot);
-  return { id: row.id, taskId: row.task_id, runKind: row.run_kind, knowledgeBaseId: row.knowledge_base_id, spaceId: row.space_id, organizationMode: scope.organizationMode, mountPageId: scope.mountPageId, scope, promptVersion: row.prompt_version, contractVersion: row.contract_version, provider: row.provider, model: row.model, egressMode: row.egress_mode, status: row.status, result: jsonParse(row.result_json, null), metrics: jsonParse(row.metrics, {}), error: row.error_code ? { code: row.error_code, message: row.error_summary } : null, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, taskId: row.task_id, runKind: row.run_kind, knowledgeBaseId: row.knowledge_base_id, spaceId: row.space_id, organizationMode: scope.organizationMode, mountPageId: scope.mountPageId, scope, promptVersion: row.prompt_version, contractVersion: row.contract_version, provider: row.provider, model: row.model, egressMode: row.egress_mode, citationPolicy: row.citation_policy || "required", status: row.status, result: jsonParse(row.result_json, null), metrics: jsonParse(row.metrics, {}), error: row.error_code ? { code: row.error_code, message: row.error_summary } : null, createdAt: row.created_at, updatedAt: row.updated_at };
 })() : null;
 export const agentRunView = runView;
 
@@ -503,7 +542,7 @@ export const getAgentEvents = (sqlite, runId) => sqlite.prepare("SELECT id,run_i
 export const agentPlanItemView = (row) => {
   if (!row) return null;
   const proposed = jsonParse(row.proposed_json, {});
-  return { id: row.id, runId: row.run_id, ordinal: row.ordinal, itemType: row.item_type, targetPageId: row.target_page_id, basePageVersionId: row.base_page_version_id, nodeId: proposed.nodeId || null, parentNodeId: proposed.parentNodeId || null, nodeRole: proposed.nodeRole || null, operation: proposed.operation || (row.item_type === "page_create" ? "create" : row.item_type === "page_update" ? "update" : null), proposed, citations: jsonParse(row.citations_json, []), diff: jsonParse(row.diff_json, null), risk: row.risk, evidenceStatus: row.evidence_status, reviewStatus: row.review_status, applicationStatus: row.application_status, appliedPageVersionId: row.applied_page_version_id, rollbackPageVersionId: row.rollback_page_version_id, decisionReason: row.decision_reason, decidedBy: row.decided_by, decidedAt: row.decided_at, appliedAt: row.applied_at, error: row.error_code ? { code: row.error_code, message: row.error_summary } : null, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, runId: row.run_id, ordinal: row.ordinal, itemType: row.item_type, targetPageId: row.target_page_id, basePageVersionId: row.base_page_version_id, nodeId: proposed.nodeId || null, parentNodeId: proposed.parentNodeId || null, nodeRole: proposed.nodeRole || null, operation: proposed.operation || (row.item_type === "page_create" ? "create" : row.item_type === "page_update" ? "update" : null), proposed, citations: jsonParse(row.citations_json, []), validationWarnings: jsonParse(row.validation_warnings, []), diff: jsonParse(row.diff_json, null), risk: row.risk, evidenceStatus: row.evidence_status, reviewStatus: row.review_status, applicationStatus: row.application_status, appliedPageVersionId: row.applied_page_version_id, rollbackPageVersionId: row.rollback_page_version_id, decisionReason: row.decision_reason, decidedBy: row.decided_by, decidedAt: row.decided_at, appliedAt: row.applied_at, error: row.error_code ? { code: row.error_code, message: row.error_summary } : null, createdAt: row.created_at, updatedAt: row.updated_at };
 };
 
 const blockedByRejectedParent = (sqlite, row) => {
@@ -525,12 +564,15 @@ const blockedByRejectedParent = (sqlite, row) => {
 
 export const agentPlanStatus = (sqlite, runId) => {
   const rows = sqlite.prepare("SELECT * FROM agent_plan_items WHERE run_id=? ORDER BY ordinal,id").all(runId);
+  const run = sqlite.prepare("SELECT citation_policy FROM agent_runs WHERE id=?").get(runId);
+  const citationPolicy = run?.citation_policy || "required";
   if (!rows.length) return "draft";
   if (rows.some((row) => blockedByRejectedParent(sqlite, row))) return "partially_applied";
   if (rows.some((row) => row.application_status === "stale" || row.application_status === "apply_failed")) return "failed";
   if (rows.every((row) => ["applied", "not_applicable", "rolled_back"].includes(row.application_status))) return "applied";
   if (rows.some((row) => ["applied", "not_applicable", "rolled_back"].includes(row.application_status))) return "partially_applied";
-  return rows.some((row) => row.evidence_status === "needs_evidence") ? "draft" : "ready";
+  if (rows.some((row) => row.evidence_status === "needs_evidence" || (citationPolicy === "required" && row.evidence_status === "unverified"))) return "draft";
+  return rows.some((row) => row.evidence_status === "unverified") ? "ready_with_warnings" : "ready";
 };
 
 export const getAgentPlanTree = (sqlite, runId) => {
@@ -608,13 +650,21 @@ const copyCitations = (sqlite, fromVersionId, toVersionId, timestamp) => {
   for (const citation of sqlite.prepare("SELECT * FROM wiki_citations WHERE page_version_id=? ORDER BY created_at,id").all(fromVersionId)) sqlite.prepare("INSERT INTO wiki_citations (id,page_version_id,block_key,resource_version_id,locator_json,status,stale_reason,checked_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)").run(crypto.randomUUID(), toVersionId, citation.block_key, citation.resource_version_id, citation.locator_json, citation.status, citation.stale_reason, citation.checked_at || timestamp, timestamp);
   for (const citation of sqlite.prepare("SELECT * FROM wiki_page_citations WHERE page_version_id=? ORDER BY created_at,id").all(fromVersionId)) sqlite.prepare("INSERT INTO wiki_page_citations (id,page_version_id,block_key,source_page_version_id,source_block_key,status,stale_reason,checked_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)").run(crypto.randomUUID(), toVersionId, citation.block_key, citation.source_page_version_id, citation.source_block_key, citation.status, citation.stale_reason, citation.checked_at || timestamp, timestamp);
 };
-const insertCitations = (sqlite, config, snapshot, pageVersionId, citations, contentMarkdown) => {
+const insertCitations = (sqlite, config, snapshot, pageVersionId, citations, contentMarkdown, citationPolicy = "required") => {
   const timestamp = now();
-  for (const citation of citations) {
-    const normalized = citationFor(sqlite, config, snapshot, citation, contentMarkdown);
+  const warnings = [];
+  for (const [citationIndex, citation] of citations.entries()) {
+    let normalized;
+    try { normalized = citationFor(sqlite, config, snapshot, citation, contentMarkdown); }
+    catch (caught) {
+      if (citationPolicy !== "warn") throw caught;
+      warnings.push(citationWarning(caught, citationIndex));
+      continue;
+    }
     if (normalized.resourceVersionId) sqlite.prepare("INSERT INTO wiki_citations (id,page_version_id,block_key,resource_version_id,locator_json,status,stale_reason,checked_at,created_at) VALUES (?,?,?,?,?,'active',NULL,?,?)").run(crypto.randomUUID(), pageVersionId, normalized.blockKey, normalized.resourceVersionId, JSON.stringify(normalized.locator), timestamp, timestamp);
     else sqlite.prepare("INSERT INTO wiki_page_citations (id,page_version_id,block_key,source_page_version_id,source_block_key,status,stale_reason,checked_at,created_at) VALUES (?,?,?,?,?,'active',NULL,?,?)").run(crypto.randomUUID(), pageVersionId, normalized.blockKey, normalized.wikiPageVersionId, normalized.sourceBlockKey, timestamp, timestamp);
   }
+  return warnings;
 };
 const queuePageEmbedding = (sqlite, config, pageId, pageVersionId) => {
   if (config.retrievalVectorEnabled === false) return;
@@ -645,8 +695,9 @@ const applyItemInTransaction = (sqlite, config, row, requestId = null, { nodePag
   const snapshot = parseScopeSnapshot(run.scope_snapshot);
   const proposed = jsonParse(row.proposed_json, {});
   const citations = jsonParse(row.citations_json, []);
+  const citationPolicy = normalizeCitationPolicy(run.citation_policy);
   const timestamp = now();
-  if (row.evidence_status === "needs_evidence") throw fail("plan item needs evidence before it can be applied", "AGENT_PLAN_INVALID");
+  if (row.evidence_status === "needs_evidence" || (row.evidence_status === "unverified" && citationPolicy !== "warn")) throw fail("plan item needs verified evidence before it can be applied", "AGENT_PLAN_INVALID");
   if (row.item_type === "tag_add") {
     const page = sqlite.prepare("SELECT * FROM wiki_pages WHERE id=? AND knowledge_base_id=? AND status='active'").get(row.target_page_id, run.knowledge_base_id);
     if (!page) throw fail("target page is unavailable", "AGENT_APPLY_FAILED");
@@ -672,14 +723,16 @@ const applyItemInTransaction = (sqlite, config, row, requestId = null, { nodePag
     const current = pageVersionFor(sqlite, page.id, page.current_version_id);
     const rollbackMetadata = { title: page.title, pageType: page.page_type, spaceId: page.space_id, parentPageId: page.parent_page_id };
     const versionId = insertVersion(sqlite, { pageId: page.id, parentVersionId: current.id, templateVersionId: current.template_version_id, contentMarkdown: proposed.contentMarkdown, changeSummary: `Agent plan ${row.id}`, timestamp });
-    insertCitations(sqlite, config, snapshot, versionId, citations, proposed.contentMarkdown);
+    const applyWarnings = insertCitations(sqlite, config, snapshot, versionId, citations, proposed.contentMarkdown, citationPolicy);
+    const validationWarnings = [...jsonParse(row.validation_warnings, []), ...applyWarnings];
+    const evidenceStatus = validationWarnings.length ? "unverified" : row.evidence_status;
     const parentPageId = snapshot.organizationMode === "tree" ? resolveTreeParent(sqlite, run, snapshot, row, proposed, nodePageIds) : assertParent(sqlite, run.knowledge_base_id, page.id, proposed.parentPageId ?? page.parent_page_id);
     sqlite.prepare("UPDATE wiki_pages SET title=?,page_type=?,space_id=?,parent_page_id=?,current_version_id=?,updated_at=? WHERE id=?").run(proposed.title, proposed.pageType, proposed.spaceId ?? page.space_id, parentPageId, versionId, timestamp, page.id);
     updateWikiSearchProjection(sqlite, page.id);
     queuePageEmbedding(sqlite, config, page.id, versionId);
-    sqlite.prepare("UPDATE agent_plan_items SET proposed_json=?,application_status='applied',applied_page_version_id=?,applied_at=?,updated_at=?,error_code=NULL,error_summary=NULL WHERE id=?").run(JSON.stringify({ ...proposed, rollbackMetadata }), versionId, timestamp, timestamp, row.id);
+    sqlite.prepare("UPDATE agent_plan_items SET proposed_json=?,evidence_status=?,validation_warnings=?,application_status='applied',applied_page_version_id=?,applied_at=?,updated_at=?,error_code=NULL,error_summary=NULL WHERE id=?").run(JSON.stringify({ ...proposed, rollbackMetadata }), evidenceStatus, JSON.stringify(validationWarnings), versionId, timestamp, timestamp, row.id);
     if (proposed.nodeId) nodePageIds.set(proposed.nodeId, page.id);
-    auditAgent(sqlite, "approve", "agent_plan_item", row.id, requestId, { itemType: row.item_type, applicationStatus: "applied", targetPageId: page.id, appliedPageVersionId: versionId });
+    auditAgent(sqlite, "approve", "agent_plan_item", row.id, requestId, { itemType: row.item_type, applicationStatus: "applied", targetPageId: page.id, appliedPageVersionId: versionId, citationPolicy, citationWarningCount: validationWarnings.length });
     return;
   }
   if (row.item_type === "page_create") {
@@ -693,12 +746,14 @@ const applyItemInTransaction = (sqlite, config, row, requestId = null, { nodePag
     sqlite.prepare("INSERT INTO wiki_pages (id,knowledge_base_id,space_id,parent_page_id,slug,title,page_type,status,current_version_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'active',NULL,?,?)").run(pageId, run.knowledge_base_id, spaceId, parentPageId, slug, proposed.title, proposed.pageType, timestamp, timestamp);
     const pageVersionId = insertVersion(sqlite, { pageId, parentVersionId: null, templateVersionId: template?.current_version_id || null, contentMarkdown: proposed.contentMarkdown, changeSummary: `Agent plan ${row.id}`, timestamp });
     sqlite.prepare("UPDATE wiki_pages SET current_version_id=? WHERE id=?").run(pageVersionId, pageId);
-    insertCitations(sqlite, config, snapshot, pageVersionId, citations, proposed.contentMarkdown);
+    const applyWarnings = insertCitations(sqlite, config, snapshot, pageVersionId, citations, proposed.contentMarkdown, citationPolicy);
+    const validationWarnings = [...jsonParse(row.validation_warnings, []), ...applyWarnings];
+    const evidenceStatus = validationWarnings.length ? "unverified" : row.evidence_status;
     updateWikiSearchProjection(sqlite, pageId);
     queuePageEmbedding(sqlite, config, pageId, pageVersionId);
-    sqlite.prepare("UPDATE agent_plan_items SET target_page_id=?,application_status='applied',applied_page_version_id=?,applied_at=?,updated_at=?,error_code=NULL,error_summary=NULL WHERE id=?").run(pageId, pageVersionId, timestamp, timestamp, row.id);
+    sqlite.prepare("UPDATE agent_plan_items SET target_page_id=?,evidence_status=?,validation_warnings=?,application_status='applied',applied_page_version_id=?,applied_at=?,updated_at=?,error_code=NULL,error_summary=NULL WHERE id=?").run(pageId, evidenceStatus, JSON.stringify(validationWarnings), pageVersionId, timestamp, timestamp, row.id);
     if (proposed.nodeId) nodePageIds.set(proposed.nodeId, pageId);
-    auditAgent(sqlite, "approve", "agent_plan_item", row.id, requestId, { itemType: row.item_type, applicationStatus: "applied", targetPageId: pageId, appliedPageVersionId: pageVersionId });
+    auditAgent(sqlite, "approve", "agent_plan_item", row.id, requestId, { itemType: row.item_type, applicationStatus: "applied", targetPageId: pageId, appliedPageVersionId: pageVersionId, citationPolicy, citationWarningCount: validationWarnings.length });
     return;
   }
   throw fail("unsupported plan item", "AGENT_PLAN_INVALID");
@@ -750,7 +805,8 @@ export const approveAgentPlanBranch = (sqlite, config, itemId, { actor = "local-
   const rows = treeApplyOrder(pageBranchRows(branchRows(sqlite, root)));
   if (!rows.length) return [approveAgentPlanItem(sqlite, config, itemId, { actor, requestId })];
   if (rows.some((row) => row.review_status !== "proposed" || row.application_status !== "pending")) throw fail("branch contains a reviewed or applied item", "AGENT_REVIEW_CONFLICT");
-  if (rows.some((row) => row.evidence_status === "needs_evidence")) throw fail("branch contains a page that needs evidence", "AGENT_PLAN_INVALID");
+  const citationPolicy = normalizeCitationPolicy(run.citation_policy);
+  if (rows.some((row) => row.evidence_status === "needs_evidence" || (row.evidence_status === "unverified" && citationPolicy !== "warn"))) throw fail("branch contains a page that needs verified evidence", "AGENT_PLAN_INVALID");
   const nodePageIds = new Map();
   try {
     sqlite.transaction(() => {
@@ -856,11 +912,11 @@ export const updateAgentPlanItem = (sqlite, config, itemId, input = {}, { actor 
     proposed: { ...rawItems[row.ordinal].proposed, ...proposedPatch },
     citations: input.citations === undefined ? rawItems[row.ordinal].citations : input.citations
   };
-  const normalized = validatePlanOutput(sqlite, config, snapshot, { items: rawItems });
+  const normalized = validatePlanOutput(sqlite, config, snapshot, { items: rawItems }, { citationPolicy: normalizeCitationPolicy(run.citation_policy) });
   const edited = normalized.items[row.ordinal];
   const timestamp = now();
   sqlite.transaction(() => {
-    sqlite.prepare("UPDATE agent_plan_items SET proposed_json=?,citations_json=?,diff_json=?,risk=?,evidence_status=?,error_code=NULL,error_summary=NULL,updated_at=? WHERE id=? AND review_status='proposed' AND application_status='pending'").run(JSON.stringify(edited.proposed), JSON.stringify(edited.citations), edited.diff ? JSON.stringify(edited.diff) : null, edited.risk, edited.evidenceStatus, timestamp, row.id);
+    sqlite.prepare("UPDATE agent_plan_items SET proposed_json=?,citations_json=?,diff_json=?,risk=?,evidence_status=?,validation_warnings=?,error_code=NULL,error_summary=NULL,updated_at=? WHERE id=? AND review_status='proposed' AND application_status='pending'").run(JSON.stringify(edited.proposed), JSON.stringify(edited.citations), edited.diff ? JSON.stringify(edited.diff) : null, edited.risk, edited.evidenceStatus, JSON.stringify(edited.validationWarnings || []), timestamp, row.id);
     auditAgent(sqlite, "edit", "agent_plan_item", row.id, requestId, { actor, evidenceStatus: edited.evidenceStatus, nodeId: edited.proposed.nodeId || null });
   })();
   return agentPlanItemView(sqlite.prepare("SELECT * FROM agent_plan_items WHERE id=?").get(row.id));

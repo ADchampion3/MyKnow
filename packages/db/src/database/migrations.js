@@ -1,4 +1,5 @@
-const SCHEMA_VERSION = "retrieval-query-256-v1";
+const SCHEMA_VERSION = "retrieval-query-256-agent-citation-policy-v1";
+const AGENT_CITATION_PREVIOUS_SCHEMA_VERSION = "retrieval-query-256-v1";
 const QUERY_PREVIOUS_SCHEMA_VERSION = "sprint6-personal-acceptance-v1";
 const PREVIOUS_SCHEMA_VERSION = "sprint5-agent-tree-v1";
 const LEGACY_PREVIOUS_SCHEMA_VERSION = "sprint5-agent-review-v1";
@@ -12,6 +13,18 @@ CREATE INDEX IF NOT EXISTS wiki_page_citations_page_version_idx ON wiki_page_cit
 const personalMigration = `
 ALTER TABLE retrieval_embeddings ADD COLUMN input_sha256 TEXT CHECK(input_sha256 IS NULL OR length(input_sha256)=64);
 CREATE INDEX retrieval_embeddings_input_idx ON retrieval_embeddings(owner_type, input_sha256, provider, model, dimensions, status);
+`;
+
+const agentCitationMigration = `
+ALTER TABLE agent_runs ADD COLUMN citation_policy TEXT NOT NULL DEFAULT 'required' CHECK(citation_policy IN ('required','warn'));
+DROP INDEX IF EXISTS agent_plan_items_run_idx;
+DROP INDEX IF EXISTS agent_plan_items_review_idx;
+ALTER TABLE agent_plan_items RENAME TO agent_plan_items_previous;
+CREATE TABLE agent_plan_items (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), ordinal INTEGER NOT NULL CHECK(ordinal >= 0), item_type TEXT NOT NULL CHECK(item_type IN ('page_create','page_update','tag_add','duplicate_finding','conflict_finding')), target_page_id TEXT REFERENCES wiki_pages(id), base_page_version_id TEXT REFERENCES wiki_page_versions(id), proposed_json TEXT NOT NULL, citations_json TEXT NOT NULL DEFAULT '[]', diff_json TEXT, risk TEXT NOT NULL CHECK(risk IN ('low','medium','high')), evidence_status TEXT NOT NULL CHECK(evidence_status IN ('used','needs_evidence','unverified','not_applicable')), validation_warnings TEXT NOT NULL DEFAULT '[]', review_status TEXT NOT NULL DEFAULT 'proposed' CHECK(review_status IN ('proposed','approved','rejected')), application_status TEXT NOT NULL DEFAULT 'pending' CHECK(application_status IN ('pending','applied','not_applicable','stale','apply_failed','rolled_back')), applied_page_version_id TEXT REFERENCES wiki_page_versions(id), rollback_page_version_id TEXT REFERENCES wiki_page_versions(id), decision_reason TEXT, decided_by TEXT, decided_at TEXT, applied_at TEXT, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(run_id, ordinal));
+INSERT INTO agent_plan_items (id,run_id,ordinal,item_type,target_page_id,base_page_version_id,proposed_json,citations_json,diff_json,risk,evidence_status,validation_warnings,review_status,application_status,applied_page_version_id,rollback_page_version_id,decision_reason,decided_by,decided_at,applied_at,error_code,error_summary,created_at,updated_at) SELECT id,run_id,ordinal,item_type,target_page_id,base_page_version_id,proposed_json,citations_json,diff_json,risk,evidence_status,'[]',review_status,application_status,applied_page_version_id,rollback_page_version_id,decision_reason,decided_by,decided_at,applied_at,error_code,error_summary,created_at,updated_at FROM agent_plan_items_previous;
+DROP TABLE agent_plan_items_previous;
+CREATE INDEX agent_plan_items_run_idx ON agent_plan_items(run_id, ordinal);
+CREATE INDEX agent_plan_items_review_idx ON agent_plan_items(review_status, application_status, created_at);
 `;
 
 const migration = `
@@ -60,10 +73,10 @@ CREATE INDEX retrieval_embeddings_raw_idx ON retrieval_embeddings(owner_type, re
 CREATE INDEX retrieval_embeddings_input_idx ON retrieval_embeddings(owner_type, input_sha256, provider, model, dimensions, status);
 CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, query TEXT NOT NULL CHECK(length(trim(query)) BETWEEN 1 AND 256), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), wiki_top_k INTEGER NOT NULL CHECK(wiki_top_k BETWEEN 1 AND 20), raw_top_k INTEGER NOT NULL CHECK(raw_top_k BETWEEN 1 AND 20), context_budget_tokens INTEGER NOT NULL CHECK(context_budget_tokens BETWEEN 1 AND 50000), wiki_budget_tokens INTEGER NOT NULL CHECK(wiki_budget_tokens >= 0), raw_budget_tokens INTEGER NOT NULL CHECK(raw_budget_tokens >= 0), vector_enabled INTEGER NOT NULL DEFAULT 0 CHECK(vector_enabled IN (0,1)), vector_provider TEXT, vector_model TEXT, status TEXT NOT NULL DEFAULT 'succeeded' CHECK(status IN ('succeeded','failed')), wiki_seeds TEXT NOT NULL, raw_seeds TEXT NOT NULL, graph_expansion TEXT NOT NULL, provenance_lookups TEXT NOT NULL, context_items TEXT NOT NULL, context_markdown TEXT NOT NULL, metrics TEXT NOT NULL, vector_status TEXT NOT NULL, trace_json TEXT NOT NULL, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);
-CREATE TABLE agent_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), run_kind TEXT NOT NULL CHECK(run_kind IN ('answer','organize')), knowledge_base_id TEXT REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), scope_snapshot TEXT NOT NULL, prompt_text TEXT NOT NULL CHECK(length(prompt_text) BETWEEN 1 AND 4000), prompt_hash TEXT NOT NULL CHECK(length(prompt_hash)=64), prompt_version TEXT NOT NULL, contract_version TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, egress_mode TEXT NOT NULL CHECK(egress_mode IN ('local_only','allow_cloud')), status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','retrying','succeeded','failed','cancelled')), metrics TEXT NOT NULL DEFAULT '{}', result_json TEXT, error_code TEXT, error_summary TEXT, idempotency_key TEXT UNIQUE, request_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE agent_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id), run_kind TEXT NOT NULL CHECK(run_kind IN ('answer','organize')), knowledge_base_id TEXT REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), scope_snapshot TEXT NOT NULL, prompt_text TEXT NOT NULL CHECK(length(prompt_text) BETWEEN 1 AND 4000), prompt_hash TEXT NOT NULL CHECK(length(prompt_hash)=64), prompt_version TEXT NOT NULL, contract_version TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, egress_mode TEXT NOT NULL CHECK(egress_mode IN ('local_only','allow_cloud')), citation_policy TEXT NOT NULL DEFAULT 'required' CHECK(citation_policy IN ('required','warn')), status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','retrying','succeeded','failed','cancelled')), metrics TEXT NOT NULL DEFAULT '{}', result_json TEXT, error_code TEXT, error_summary TEXT, idempotency_key TEXT UNIQUE, request_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX agent_runs_status_idx ON agent_runs(status, created_at, id);
 CREATE INDEX agent_runs_kb_idx ON agent_runs(knowledge_base_id, created_at, id);
-CREATE TABLE agent_plan_items (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), ordinal INTEGER NOT NULL CHECK(ordinal >= 0), item_type TEXT NOT NULL CHECK(item_type IN ('page_create','page_update','tag_add','duplicate_finding','conflict_finding')), target_page_id TEXT REFERENCES wiki_pages(id), base_page_version_id TEXT REFERENCES wiki_page_versions(id), proposed_json TEXT NOT NULL, citations_json TEXT NOT NULL DEFAULT '[]', diff_json TEXT, risk TEXT NOT NULL CHECK(risk IN ('low','medium','high')), evidence_status TEXT NOT NULL CHECK(evidence_status IN ('used','needs_evidence','not_applicable')), review_status TEXT NOT NULL DEFAULT 'proposed' CHECK(review_status IN ('proposed','approved','rejected')), application_status TEXT NOT NULL DEFAULT 'pending' CHECK(application_status IN ('pending','applied','not_applicable','stale','apply_failed','rolled_back')), applied_page_version_id TEXT REFERENCES wiki_page_versions(id), rollback_page_version_id TEXT REFERENCES wiki_page_versions(id), decision_reason TEXT, decided_by TEXT, decided_at TEXT, applied_at TEXT, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(run_id, ordinal));
+CREATE TABLE agent_plan_items (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), ordinal INTEGER NOT NULL CHECK(ordinal >= 0), item_type TEXT NOT NULL CHECK(item_type IN ('page_create','page_update','tag_add','duplicate_finding','conflict_finding')), target_page_id TEXT REFERENCES wiki_pages(id), base_page_version_id TEXT REFERENCES wiki_page_versions(id), proposed_json TEXT NOT NULL, citations_json TEXT NOT NULL DEFAULT '[]', diff_json TEXT, risk TEXT NOT NULL CHECK(risk IN ('low','medium','high')), evidence_status TEXT NOT NULL CHECK(evidence_status IN ('used','needs_evidence','unverified','not_applicable')), validation_warnings TEXT NOT NULL DEFAULT '[]', review_status TEXT NOT NULL DEFAULT 'proposed' CHECK(review_status IN ('proposed','approved','rejected')), application_status TEXT NOT NULL DEFAULT 'pending' CHECK(application_status IN ('pending','applied','not_applicable','stale','apply_failed','rolled_back')), applied_page_version_id TEXT REFERENCES wiki_page_versions(id), rollback_page_version_id TEXT REFERENCES wiki_page_versions(id), decision_reason TEXT, decided_by TEXT, decided_at TEXT, applied_at TEXT, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(run_id, ordinal));
 CREATE INDEX agent_plan_items_run_idx ON agent_plan_items(run_id, ordinal);
 CREATE INDEX agent_plan_items_review_idx ON agent_plan_items(review_status, application_status, created_at);
 CREATE TABLE agent_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_runs(id), sequence INTEGER NOT NULL CHECK(sequence >= 0), event_type TEXT NOT NULL, stage TEXT, tool_name TEXT, duration_ms INTEGER, input_hash TEXT, output_hash TEXT, result_size INTEGER, input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cost_total TEXT, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, UNIQUE(run_id, sequence));
@@ -78,6 +91,13 @@ CREATE INDEX wiki_page_tags_tag_idx ON wiki_page_tags(tag_id, page_id);
 `;
 
 const userObject = (sqlite) => sqlite.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','index','view','trigger') AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
+const tableHasColumn = (sqlite, table, column) => sqlite.prepare(`PRAGMA table_info(${table})`).all().some((item) => item.name === column);
+const applyAgentCitationMigration = (sqlite) => {
+  const hasPolicy = tableHasColumn(sqlite, "agent_runs", "citation_policy");
+  const hasWarnings = tableHasColumn(sqlite, "agent_plan_items", "validation_warnings");
+  if (hasPolicy !== hasWarnings) throw Object.assign(new Error("agent citation schema is partially migrated; recreate the database"), { code: "DATABASE_RECREATE_REQUIRED" });
+  if (!hasPolicy) sqlite.exec(agentCitationMigration);
+};
 
 export function migrate(sqlite) {
   const timestamp = new Date().toISOString();
@@ -92,8 +112,16 @@ export function migrate(sqlite) {
         const tableSql = migration.match(/CREATE TABLE retrieval_runs .*?;/u)[0];
         sqlite.exec(tableSql.replace("CREATE TABLE retrieval_runs", "CREATE TABLE retrieval_runs_new"));
         sqlite.exec("INSERT INTO retrieval_runs_new SELECT * FROM retrieval_runs; DROP TABLE retrieval_runs; ALTER TABLE retrieval_runs_new RENAME TO retrieval_runs; CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);");
+        applyAgentCitationMigration(sqlite);
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='derived_schema'").run("sprint6-personal-derived-ready", timestamp);
+      })();
+      return { fresh: false, migratedFrom: marker.value, schemaVersion: SCHEMA_VERSION };
+    }
+    if (marker?.value === AGENT_CITATION_PREVIOUS_SCHEMA_VERSION) {
+      sqlite.transaction(() => {
+        applyAgentCitationMigration(sqlite);
+        sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
       })();
       return { fresh: false, migratedFrom: marker.value, schemaVersion: SCHEMA_VERSION };
     }

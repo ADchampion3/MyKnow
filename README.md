@@ -4,17 +4,16 @@ MyKnow 是一个本地优先的个人知识库原型。当前仓库保留 Web、
 
 ## 启动
 
-要求 Node.js 20+。在三个终端分别运行：
+要求 Node.js 20+。首次安装依赖后，在仓库根目录运行：
 
 ```powershell
-npm run dev:api
-npm run dev:worker
-npm run dev:web
+npm install
+npm run dev
 ```
 
-默认端口：API `3001`，Web `3000`。API 健康检查：`GET /health`；就绪检查：`GET /ready`。
+`npm run dev` 会在一个终端启动 API、Worker 和 Web，按 `Ctrl+C` 会一起停止。默认端口：API `3001`，Web `3000`。API 健康检查：`GET /health`；就绪检查：`GET /ready`。
 
-复制 `.env.example` 为 `.env` 后可调整数据库、资源存储、模型和端口配置。密钥只放在服务端环境变量中，不要写入前端代码、业务数据或日志。
+本地 mock 模式不需要创建 `.env`，默认会使用 SQLite `data/myknow.db` 并自动创建数据目录。如需调整端口、数据库、资源目录或接入真实模型，再复制 `.env.example` 为 `.env`。密钥只放在服务端环境变量中，不要写入前端代码、业务数据或日志。需要单独调试某个进程时，仍可使用 `npm run dev:api`、`npm run dev:worker` 或 `npm run dev:web`。
 
 ## 运行边界
 
@@ -40,6 +39,11 @@ docs/RETRIEVAL_MECHANISM.md  当前检索机制与审核
 
 项目细节仍在重新设计中；新的设计决定和验证方式应在需求明确后再补充。
 
+## Wiki mechanism
+
+Wiki 页面、版本、引用、索引和 Agent 审核机制见 [`docs/WIKI_MECHANISM.md`](docs/WIKI_MECHANISM.md)。
+Agent Wiki 引用的 `warn|required` 策略见 [`docs/AGENT_CITATION_POLICY.md`](docs/AGENT_CITATION_POLICY.md)。
+
 ## Eval dashboard
 
-启动 Web 后打开 `http://localhost:3000/evals/raw-hybrid`，查看 SciFact raw-hybrid retrieval 报告。页面说明见 [`docs/RAW_HYBRID_RETRIEVAL_DASHBOARD.md`](docs/RAW_HYBRID_RETRIEVAL_DASHBOARD.md)。
+启动开发栈后打开 `http://localhost:3000/evals/raw-hybrid`，查看 SciFact raw-hybrid retrieval 报告。页面说明见 [`docs/RAW_HYBRID_RETRIEVAL_DASHBOARD.md`](docs/RAW_HYBRID_RETRIEVAL_DASHBOARD.md)。

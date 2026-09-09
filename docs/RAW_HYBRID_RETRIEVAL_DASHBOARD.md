@@ -9,7 +9,7 @@
 在仓库根目录运行：
 
 ```powershell
-npm run dev:web
+npm run dev
 ```
 
 然后打开 <http://localhost:3000/evals/raw-hybrid>。

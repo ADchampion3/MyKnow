@@ -23,7 +23,7 @@ const readResourceSchema = Type.Object({
   endOffset: Type.Optional(Type.Integer({ minimum: 1 }))
 });
 
-export const createAgentTools = ({ sqlite, config, snapshot, holder, kind, audit, onRetrievalRun = () => {} }) => {
+export const createAgentTools = ({ sqlite, config, snapshot, holder, kind, citationPolicy = "required", audit, onRetrievalRun = () => {} }) => {
   const executeRead = async (toolName, callback, toolCallId, params, signal) => {
     if (signal?.aborted) throw Object.assign(new Error("Agent task was cancelled"), { code: "TASK_CANCELLED" });
     const value = await callback(params);
@@ -118,10 +118,10 @@ export const createAgentTools = ({ sqlite, config, snapshot, holder, kind, audit
       execute: async (toolCallId, params, signal) => {
         if (signal?.aborted) throw Object.assign(new Error("Agent task was cancelled"), { code: "TASK_CANCELLED" });
         let plan;
-        try { plan = validatePlanOutput(sqlite, config, snapshot, params); }
+        try { plan = validatePlanOutput(sqlite, config, snapshot, params, { citationPolicy }); }
         catch (caught) { holder.error = { code: caught.code || "AGENT_OUTPUT_INVALID", message: caught.message }; throw caught; }
         holder.value = plan;
-        return { ...result({ accepted: true, itemCount: plan.items.length, evidenceStatuses: plan.items.map((item) => item.evidenceStatus) }, { toolName: "submit_change_plan", toolCallId, itemCount: plan.items.length }), terminate: true };
+        return { ...result({ accepted: true, itemCount: plan.items.length, evidenceStatuses: plan.items.map((item) => item.evidenceStatus), warningCount: plan.warningCount }, { toolName: "submit_change_plan", toolCallId, itemCount: plan.items.length, warningCount: plan.warningCount }), terminate: true };
       }
     });
   }

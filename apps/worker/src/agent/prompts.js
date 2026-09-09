@@ -14,14 +14,14 @@ Answer workflow:
 3. Finish by calling submit_answer exactly once. Its answerMarkdown is the user-facing answer; citations must use exact resourceVersionId and locator values returned by tools. Put general model knowledge in modelSupplement and label it clearly. Use evidenceStatus=no_match or index_unavailable when the scoped evidence does not support an answer. For an open chat with no KB, use evidenceStatus=none and an empty evidence array.
 Do not answer with ordinary assistant text before submit_answer.`;
 
-export const organizeSystemPrompt = (snapshot) => `${common}
+export const organizeSystemPrompt = (snapshot, citationPolicy = "required") => `${common}
 
 You are preparing a reviewable Wiki organization plan for this immutable scope: ${scopeSummary(snapshot)}
 
 Organization workflow:
 1. Search and read the scoped sources/pages. Do not scan outside the snapshot.
 2. Propose only useful, bounded changes. page_update must include the exact captured basePageVersionId and full replacement Markdown. page_create must include title, pageType, and full Markdown. tag_add may reference an existing tag only. duplicate_finding and conflict_finding are review records, not direct writes.
-3. Every substantive page recommendation must cite an exact resource version plus locator, or an exact selected Wiki page version (optionally a source block). Missing evidence becomes needs_evidence and cannot be applied.
+3. Every substantive page recommendation should cite an exact resource version plus locator, or an exact selected Wiki page version (optionally a source block). The active citation policy is ${citationPolicy}. In required mode, missing or invalid evidence blocks the plan. In warn mode, cite whenever possible; unverifiable citations are reported as warnings and are omitted from stored provenance. Never invent a citation.
 4. Finish by calling submit_change_plan exactly once. The server calculates and checks diffs, versions, scope, citations, risk, and write permissions.
 ${snapshot.organizationMode === "tree" ? `
 Tree mode rules:

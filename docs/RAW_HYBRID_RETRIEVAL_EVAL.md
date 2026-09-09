@@ -137,7 +137,7 @@ usable vectors. A missing provider, endpoint, model, snapshot, or compatible
 manifest is a hard precondition failure; mock embeddings are never substituted.
 
 The report printed to stdout contains per-query qrels, raw child chunk IDs,
-public rank metadata (`rank`, `keywordRank`, `vectorRank`, `rrfScore`), metric
+public rank metadata (`rank`, `keywordRank`, `vectorRank`, `bm25Score`, `rrfScore`), metric
 scores/reasons, and macro averages across queries. A successful run persists
 `evals/raw-hybrid-retrieval/reports/scifact-raw-hybrid-report.json` atomically;
 set `RAW_HYBRID_EVAL_REPORT_PATH` to choose another path. A failed run cannot

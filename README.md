@@ -39,3 +39,7 @@ docs/RETRIEVAL_MECHANISM.md  当前检索机制与审核
 ```
 
 项目细节仍在重新设计中；新的设计决定和验证方式应在需求明确后再补充。
+
+## Eval dashboard
+
+启动 Web 后打开 `http://localhost:3000/evals/raw-hybrid`，查看 SciFact raw-hybrid retrieval 报告。页面说明见 [`docs/RAW_HYBRID_RETRIEVAL_DASHBOARD.md`](docs/RAW_HYBRID_RETRIEVAL_DASHBOARD.md)。

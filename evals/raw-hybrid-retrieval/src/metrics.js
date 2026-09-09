@@ -57,6 +57,7 @@ export const validateRanking = (input) => {
       keywordRank: optionalPositiveRank(raw.keywordRank, `retrieval ranking result ${index}.keywordRank`),
       vectorRank: optionalPositiveRank(raw.vectorRank, `retrieval ranking result ${index}.vectorRank`),
       rrfScore: optionalFinite(raw.rrfScore, `retrieval ranking result ${index}.rrfScore`),
+      bm25Score: optionalFinite(raw.bm25Score, `retrieval ranking result ${index}.bm25Score`),
       keywordScore: optionalFinite(raw.keywordScore, `retrieval ranking result ${index}.keywordScore`),
       vectorScore: optionalFinite(raw.vectorScore, `retrieval ranking result ${index}.vectorScore`),
       normalizedScore: optionalFinite(raw.normalizedScore, `retrieval ranking result ${index}.normalizedScore`)
@@ -73,6 +74,7 @@ export const publicRawRanking = (results) => {
     keywordRank: result.keywordRank ?? null,
     vectorRank: result.vectorRank ?? null,
     rrfScore: result.rrfScore ?? null,
+    bm25Score: result.bm25Score ?? null,
     keywordScore: result.keywordScore ?? null,
     vectorScore: result.vectorScore ?? null,
     normalizedScore: result.normalizedScore ?? null

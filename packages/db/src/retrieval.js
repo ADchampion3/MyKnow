@@ -6,6 +6,9 @@ import { estimateTokens, tokenizeText } from "./text-tokenizer.js";
 export const RETRIEVAL_SCHEMA_VERSION = "sprint4-rag-retrieval-v1";
 export const RETRIEVAL_DEFAULTS = Object.freeze({ wikiTopK: 5, rawTopK: 10, contextBudgetTokens: 8000, wikiBudgetRatio: 0.6, rawBudgetRatio: 0.4, maxTopK: 20, maxContextBudgetTokens: 50000 });
 export const WIKI_SEED_GATE = Object.freeze({ minScore: 0.70, minMargin: 0.10 });
+const KEYWORD_CANDIDATE_LIMITS = Object.freeze({ wiki: 200, raw: 400 });
+const VECTOR_RESULT_LIMIT = 200;
+const RRF_RANK_CONSTANT = 10;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const isUuid = (value) => typeof value === "string" && UUID_RE.test(value);
 
@@ -154,6 +157,8 @@ const rawResult = (sqlite, row, tokens, vectorScore = null) => {
     contextHeader: row.context_header || null,
     locator: jsonParse(row.locator, { chunkId: row.chunk_id, resourceVersionId: row.resource_version_id }),
     snippet: snippetFor(row.chunk_content, tokens),
+    bm25Score: row.bm25_score ?? null,
+    // Keep the legacy match score for explanations and the Wiki gate; Raw keyword order comes from bm25Score.
     normalizedScore: score.normalizedScore,
     matchedFeatures: score.matchedFeatures,
     keywordScore: score.normalizedScore,
@@ -168,11 +173,11 @@ const wikiKeywordRows = (sqlite, knowledgeBaseId, spaceId, ftsQuery) => {
   const clauses = ["f.content MATCH ?", "p.knowledge_base_id=?", "p.status='active'", "p.page_type NOT IN ('index','log')", "p.current_version_id=v.id", "f.page_id=p.id", "f.page_version_id=v.id"];
   const args = [ftsQuery, knowledgeBaseId];
   if (spaceId) { clauses.push("p.space_id=?"); args.push(spaceId); }
-  return sqlite.prepare(`SELECT f.page_id,f.page_version_id,p.slug,p.space_id,p.page_type,p.status AS page_status,p.title AS page_title,v.content_markdown FROM wiki_fts f JOIN wiki_pages p ON p.id=f.page_id JOIN wiki_page_versions v ON v.id=f.page_version_id WHERE ${clauses.join(" AND ")} ORDER BY f.rowid LIMIT 200`).all(...args);
+  return sqlite.prepare(`SELECT f.page_id,f.page_version_id,p.slug,p.space_id,p.page_type,p.status AS page_status,p.title AS page_title,v.content_markdown FROM wiki_fts f JOIN wiki_pages p ON p.id=f.page_id JOIN wiki_page_versions v ON v.id=f.page_version_id WHERE ${clauses.join(" AND ")}`).all(...args);
 };
 
 const rawKeywordRows = (sqlite, knowledgeBaseId, ftsQuery) => sqlite.prepare(`
-  SELECT f.chunk_id,c.content AS chunk_content,c.context_header,c.locator,c.processing_run_id,
+  SELECT f.chunk_id,bm25(resource_fts) AS bm25_score,c.content AS chunk_content,c.context_header,c.locator,c.processing_run_id,
     p.content AS parent_content,r.id AS resource_id,r.name AS resource_name,rv.id AS resource_version_id,rv.title AS resource_title
   FROM resource_fts f
   JOIN chunks c ON c.id=f.chunk_id
@@ -184,19 +189,22 @@ const rawKeywordRows = (sqlite, knowledgeBaseId, ftsQuery) => sqlite.prepare(`
   WHERE f.content MATCH ? AND rkb.knowledge_base_id=? AND r.status<>'archived'
     AND r.current_version_id=rv.id AND rv.status='indexed' AND rv.active_processing_run_id=c.processing_run_id
     AND pr.status='indexed' AND c.chunk_type='text' AND c.status='active'
-  ORDER BY f.rowid LIMIT 400
+  ORDER BY bm25(resource_fts) ASC, f.chunk_id ASC
+  LIMIT ${KEYWORD_CANDIDATE_LIMITS.raw}
 `).all(ftsQuery, knowledgeBaseId);
 
 const wikiKeywordSearch = (sqlite, knowledgeBaseId, spaceId, tokens) => {
   const ftsQuery = ftsQueryFor(tokens);
   if (!ftsQuery) return [];
-  return wikiKeywordRows(sqlite, knowledgeBaseId, spaceId, ftsQuery).map((row) => pageResult(sqlite, row, tokens)).sort(sortByScore);
+  // ponytail: score every FTS match before the fixed 200-row ceiling; move relevance ordering into SQLite/FTS if this scan outgrows the local MVP ceiling.
+  return wikiKeywordRows(sqlite, knowledgeBaseId, spaceId, ftsQuery).map((row) => pageResult(sqlite, row, tokens)).sort(sortByScore).slice(0, KEYWORD_CANDIDATE_LIMITS.wiki);
 };
 
 const rawKeywordSearch = (sqlite, knowledgeBaseId, tokens) => {
   const ftsQuery = ftsQueryFor(tokens);
   if (!ftsQuery) return [];
-  return rawKeywordRows(sqlite, knowledgeBaseId, ftsQuery).map((row) => rawResult(sqlite, row, tokens)).sort(sortByScore);
+  // ponytail: keep the fixed 400-row BM25 candidate ceiling; move to a scale-aware retrieval backend when local FTS outgrows it.
+  return rawKeywordRows(sqlite, knowledgeBaseId, ftsQuery).map((row) => rawResult(sqlite, row, tokens));
 };
 
 const vectorRowsForWiki = (sqlite, knowledgeBaseId, spaceId, provider) => {
@@ -226,7 +234,7 @@ const vectorSearch = (rows, builder, queryVector) => rows.map((row) => {
   const vector = jsonParse(row.vector_json, null);
   const similarity = cosineSimilarity(queryVector, vector);
   return similarity === null ? null : builder(row, similarity);
-}).filter(Boolean).sort((left, right) => right.vectorScore - left.vectorScore || String(left.id).localeCompare(String(right.id))).slice(0, 200);
+}).filter(Boolean).sort((left, right) => right.vectorScore - left.vectorScore || String(left.id).localeCompare(String(right.id))).slice(0, VECTOR_RESULT_LIMIT);
 
 const mergeResults = (keywordResults, vectorResults, topK) => {
   const merged = new Map();
@@ -237,11 +245,12 @@ const mergeResults = (keywordResults, vectorResults, topK) => {
     const current = merged.get(result.id);
     merged.set(result.id, current ? { ...current, vectorRank: index + 1, vectorScore: result.vectorScore } : { ...result, vectorRank: index + 1, keywordRank: null, keywordScore: null });
   });
+  // RRF owns merged order; legacy normalizedScore remains explanation/gate metadata only.
   return [...merged.values()].map((result) => {
-    const keywordPart = result.keywordRank ? 1 / (60 + result.keywordRank) : 0;
-    const vectorPart = result.vectorRank ? 1 / (60 + result.vectorRank) : 0;
+    const keywordPart = result.keywordRank ? 1 / (RRF_RANK_CONSTANT + result.keywordRank) : 0;
+    const vectorPart = result.vectorRank ? 1 / (RRF_RANK_CONSTANT + result.vectorRank) : 0;
     return { ...result, keywordRank: result.keywordRank ?? null, vectorRank: result.vectorRank ?? null, rrfScore: keywordPart + vectorPart, normalizedScore: result.keywordScore ?? Math.max(0, Math.min(1, ((result.vectorScore ?? 0) + 1) / 2)) };
-  }).sort((left, right) => right.rrfScore - left.rrfScore || right.normalizedScore - left.normalizedScore || String(left.id).localeCompare(String(right.id))).slice(0, topK).map((result, index) => ({ ...result, rank: index + 1 }));
+  }).sort((left, right) => right.rrfScore - left.rrfScore || String(left.id).localeCompare(String(right.id))).slice(0, topK).map((result, index) => ({ ...result, rank: index + 1 }));
 };
 
 const pageFromId = (sqlite, pageId) => sqlite.prepare("SELECT p.id,p.knowledge_base_id,p.space_id,p.slug,p.title,p.page_type,p.status,p.current_version_id,v.content_markdown FROM wiki_pages p LEFT JOIN wiki_page_versions v ON v.id=p.current_version_id WHERE p.id=?").get(pageId);
@@ -472,11 +481,11 @@ export const executeRetrieval = async ({ sqlite, config, input, onAudit = () => 
     let stage = Date.now();
     const wikiKeyword = wikiKeywordSearch(sqlite, request.knowledgeBaseId, request.spaceId, tokens);
     trace.metrics.keywordWikiMs = Date.now() - stage;
-    trace.keyword.wiki = { candidateCount: wikiKeyword.length, terms: tokens.terms };
+    trace.keyword.wiki = { candidateCount: wikiKeyword.length, terms: tokens.terms, ranking: "legacy_match_score" };
     stage = Date.now();
     const rawKeyword = rawKeywordSearch(sqlite, request.knowledgeBaseId, tokens);
     trace.metrics.keywordRawMs = Date.now() - stage;
-    trace.keyword.raw = { candidateCount: rawKeyword.length, terms: tokens.terms };
+    trace.keyword.raw = { candidateCount: rawKeyword.length, terms: tokens.terms, ranking: "bm25", candidateLimit: KEYWORD_CANDIDATE_LIMITS.raw };
     let wikiVector = [];
     let rawVector = [];
     if (trace.vector.enabled) {

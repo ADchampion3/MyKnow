@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ftsQueryFor } from "@myknow/db";
 import {
   CORPUS_SCHEMA_VERSION,
   QRELS_SCHEMA_VERSION,
@@ -188,10 +189,16 @@ describe("raw hybrid isolated fixture", () => {
       const [{ trace, testCase }] = evaluation.cases;
       expect(trace.status).toBe("succeeded");
       expect(trace.vector).toMatchObject({ provider: "openai-compatible", model: "eval-http-model", dimensions: 4096, status: "used", keywordFallback: false });
+      expect(trace.keyword.raw).toMatchObject({ ranking: "bm25", candidateLimit: 400 });
       expect(trace.raw.results.length).toBeGreaterThan(0);
       expect(trace.raw.results.map((result) => result.id)).toEqual(expect.arrayContaining(["chunk-alpha-primary", "chunk-alpha-secondary"]));
       expect(trace.raw.results.every((result) => ["chunk-alpha-primary", "chunk-alpha-secondary", "chunk-beta"].includes(result.id))).toBe(true);
       expect(trace.raw.results[0]).toEqual(expect.objectContaining({ id: expect.any(String), chunkId: expect.any(String), rank: 1, keywordRank: expect.any(Number), vectorRank: expect.any(Number), rrfScore: expect.any(Number) }));
+      const keywordOrder = [...trace.raw.results].sort((left, right) => left.keywordRank - right.keywordRank);
+      const bm25Order = evaluation.fixture.sqlite.prepare("SELECT chunk_id,bm25(resource_fts) AS bm25_score FROM resource_fts WHERE content MATCH ? ORDER BY bm25(resource_fts),chunk_id").all(ftsQueryFor("alpha retrieval"));
+      expect(keywordOrder.map((result) => result.id)).toEqual(bm25Order.map((row) => row.chunk_id));
+      expect(keywordOrder[0]).toEqual(expect.objectContaining({ bm25Score: bm25Order[0].bm25_score, matchedFeatures: expect.objectContaining({ matchedTerms: expect.arrayContaining(["alpha", "retrieval"]), coverage: 1, phrase: true }) }));
+      expect(keywordOrder.map((result) => result.id)).not.toEqual([...keywordOrder].sort((left, right) => right.normalizedScore - left.normalizedScore || left.id.localeCompare(right.id)).map((result) => result.id));
       expect(evaluation.fixture.sqlite.prepare("SELECT count(*) AS count FROM retrieval_runs").get().count).toBe(1);
       expect(embeddingServer.requests).toHaveLength(4);
 
@@ -205,7 +212,7 @@ describe("raw hybrid isolated fixture", () => {
       expect(report.qrels).toMatchObject({ queryCount: 1, judgmentCount: 2 });
       expect(report.metricKValues).toEqual([1, 3, 5, 10]);
       expect(Object.keys(report.macroAverage)).toHaveLength(20);
-      expect(report.queries[0].retrieved[0]).toEqual(expect.objectContaining({ id: expect.any(String), keywordRank: expect.any(Number), vectorRank: expect.any(Number), rrfScore: expect.any(Number) }));
+      expect(report.queries[0].retrieved[0]).toEqual(expect.objectContaining({ id: expect.any(String), keywordRank: expect.any(Number), vectorRank: expect.any(Number), bm25Score: expect.any(Number), rrfScore: expect.any(Number) }));
       expect(report.queries[0].metrics["Recall@1"].details).toMatchObject({ relevantCount: 2, hitCount: expect.any(Number) });
       expect(Object.values(report.macroAverage).every((score) => score >= 0 && score <= 1)).toBe(true);
       expect(fs.readdirSync(dataDir).sort()).toEqual(evaluationFiles);

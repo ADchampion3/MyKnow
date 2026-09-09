@@ -13,7 +13,7 @@ qrels.json ──────┘          │
                             │
                             └─ evaluate ─> 内存 SQLite fixture
                                            │
-                                           ├─ keyword: resource_fts
+                                           ├─ keyword: resource_fts (BM25 + LIMIT 400)
                                            ├─ vector: query embedding + retrieval_embeddings
                                            └─ RRF merge
                                                   │
@@ -157,7 +157,7 @@ Vitest 入口 [`raw-hybrid-retrieval.eval.js#L1-L27`](../evals/raw-hybrid-retrie
 ```text
 query text
    ├─ tokenizeQuery()
-   │    └─ rawKeywordSearch() ─> resource_fts ─> keyword ranking
+   │    └─ rawKeywordSearch() ─> resource_fts ─> BM25 ranking + LIMIT 400
    │
    └─ provider.embedText(query)
         └─ vectorRowsForRaw() ─> retrieval_embeddings
@@ -178,7 +178,7 @@ keyword ranking + vector ranking
 | `LLMTestCase` 字段 | 实际内容 |
 | --- | --- |
 | `input` | 原始 query 文本 |
-| `actualOutput` | 序列化后的 raw ranking，包含 chunk ID、rank、keyword/vector rank、RRF 等字段 |
+| `actualOutput` | 序列化后的 raw ranking，包含 chunk ID、rank、BM25、keyword/vector rank、RRF 等字段 |
 | `additionalMetadata.qrels` | 当前 query 的人工相关性判断 |
 | `additionalMetadata.queryId/tags` | 追踪和报告用途的 query 元数据 |
 

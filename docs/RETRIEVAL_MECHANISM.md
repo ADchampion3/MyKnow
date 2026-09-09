@@ -103,9 +103,9 @@ FTS："retrieval" OR "知识" OR "识库"
 
 这样做是为了让 SQLite FTS5 的默认 tokenizer 也能对中文产生可匹配的词片段。它不是中文分词器，也不会理解词性、同义词、实体或拼写变体。
 
-### 4.3 自定义关键词评分
+### 4.3 Wiki 自定义关键词匹配分
 
-FTS 负责找候选，最终关键词相关性由 JavaScript 重新计算。对每个候选，系统计算：
+Wiki FTS 负责找候选，Wiki 关键词结果继续用 JavaScript 的原有匹配分排序和做 seed gate。Raw FTS 使用 SQLite FTS5 的 BM25 排序和候选截断；JavaScript 仍对入选候选计算解释信息：
 
 ```text
 score = min(1,
@@ -116,7 +116,7 @@ score = min(1,
 )
 ```
 
-候选命中至少一个 OR term 后，再按这个 `normalizedScore` 排序。查询与索引文本中的 term 集合均来自同一 tokenizer，因此评分和召回的词粒度一致。
+Wiki 候选命中至少一个 OR term 后，再按这个 `normalizedScore` 排序。查询与索引文本中的 term 集合均来自同一 tokenizer，因此评分和召回的词粒度一致。Raw 候选的排序和截断由 FTS5 BM25 完成，不使用这个匹配分。
 
 这里的“完整短语命中”是规范化字符串的 substring 命中，不是 FTS phrase query；标点、空格和中英文混排可能影响结果。
 
@@ -162,18 +162,20 @@ Wiki 和 Raw 分别完成关键词召回、向量召回和融合，不会把 Wik
 
 每个通道的候选上限是：
 
-- Wiki 关键词最多 200 行；
-- Raw 关键词最多 400 行；
+- Wiki 关键词按原有匹配分排序后最多保留 200 行；
+- Raw 关键词按 `bm25(resource_fts)` 排序后最多保留 400 行（FTS5 的 BM25 分数越小越相关）；
 - 向量扫描后最多保留 200 个；
 - 默认输出 `wikiTopK=5`、`rawTopK=10`，请求上限为 20。
+
+Raw 关键词 SQL 阶段在生命周期过滤后用 `ORDER BY bm25(resource_fts)` 和 `LIMIT 400` 完成排序与候选截断；不会再用旧覆盖分重新排序。`matchedFeatures`、覆盖率、短语命中和 `normalizedScore` 仍保留用于解释，Wiki gate 继续读取独立的原有 `keywordScore`。
 
 融合使用 RRF：
 
 ```text
-rrfScore = 1 / (60 + keywordRank) + 1 / (60 + vectorRank)
+rrfScore = 1 / (10 + keywordRank) + 1 / (10 + vectorRank)
 ```
 
-未出现在某一路的候选，该路贡献为 0。最终先按 `rrfScore`，再按 `normalizedScore` 和稳定 ID 排序。
+未出现在某一路的候选，该路贡献为 0。较小的 rank 常数保留高排名之间的区分度，避免普通的双路交集仅凭第二路存在就压过单路的高排名结果。最终先按 `rrfScore`，再按稳定 ID 排序；旧覆盖分不参与 Raw 的关键词或融合重排。
 
 注意：`normalizedScore` 在同时命中关键词和向量时保留关键词 score；只有仅命中向量的候选才把 cosine similarity 从 `[-1, 1]` 线性映射到 `[0, 1]`。因此 `normalizedScore` 不是跨候选、跨通道可比较的统一概率，也不能直接解释为“相关度百分比”。真正的融合顺序是 `rrfScore`。
 
@@ -302,7 +304,7 @@ gate 要求 `keywordRank` 且使用 `keywordScore`，所以向量独有的 Wiki 
 
 ### 中影响：分数没有统一标尺
 
-关键词 score 是 term 覆盖规则，向量 score 是 cosine similarity，RRF 是 rank 分数。当前排序是可用的，但任何 UI 进度条或业务阈值都不应直接把 `normalizedScore` 当成概率。seed gate 也只适用于当前这套关键词规则，不能自动迁移到新的 scorer。
+Wiki gate 的 `keywordScore` 是 term 覆盖规则；Raw 的 `bm25Score` 才是 FTS5 BM25，Raw 的 `keywordScore` 仍是仅供解释的旧匹配分。向量 score 是 cosine similarity，RRF 是 rank 分数。当前排序是可用的，但任何 UI 进度条或业务阈值都不应直接把 `normalizedScore` 当成概率。seed gate 也只适用于 Wiki 当前这套关键词规则，不能自动迁移到 Raw 的 BM25 scorer。
 
 ### 中影响：上下文预算不是模型 tokenizer 预算
 

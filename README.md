@@ -43,6 +43,7 @@ docs/RETRIEVAL_MECHANISM.md  当前检索机制与审核
 
 Wiki 页面、版本、引用、索引和 Agent 审核机制见 [`docs/WIKI_MECHANISM.md`](docs/WIKI_MECHANISM.md)。
 Agent Wiki 引用的 `warn|required` 策略见 [`docs/AGENT_CITATION_POLICY.md`](docs/AGENT_CITATION_POLICY.md)。
+Web 工作台的模块布局、视觉令牌和空数据库启动说明见 [`docs/FRONTEND_UI.md`](docs/FRONTEND_UI.md)。
 
 ## Eval dashboard
 

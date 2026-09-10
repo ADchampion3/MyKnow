@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 const apiBase = () => typeof document !== "undefined" ? document.body?.dataset.apiUrl || "http://localhost:3001" : "http://localhost:3001";
 
 const request = async (path, options = {}) => {
-  const headers = options.body instanceof FormData ? {} : { "content-type": "application/json", ...(options.headers || {}) };
+  const headers = { ...(options.body instanceof FormData ? {} : { "content-type": "application/json" }), ...(options.headers || {}) };
   const response = await fetch(`${apiBase()}${path}`, { ...options, headers });
   const body = response.status === 204 ? { data: null, error: null } : await response.json();
   if (!response.ok) throw Object.assign(new Error(body.error?.message || "请求失败"), { code: body.error?.code || "HTTP_ERROR" });
@@ -13,6 +13,21 @@ const request = async (path, options = {}) => {
 };
 
 const json = (value) => JSON.stringify(value);
+const uploadStatusText = { queued: "等待上传", uploading: "上传中", success: "已加入处理队列", error: "上传失败", invalid: "格式不支持" };
+const supportedUploadExtensions = new Set([".md", ".txt", ".pdf"]);
+const uploadFileExtension = (name) => {
+  const value = String(name || "").toLowerCase();
+  const index = value.lastIndexOf(".");
+  return index >= 0 ? value.slice(index) : "";
+};
+const isSupportedUploadFile = (file) => supportedUploadExtensions.has(uploadFileExtension(file?.name));
+const uploadFileKey = (file) => [file?.name || "", file?.size || 0, file?.lastModified || 0].join("\u0000");
+const createUploadId = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const formatFileSize = (bytes) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
 const retrievalLocatorPath = (item) => {
   const locator = item.locator || {};
   const params = new URLSearchParams();
@@ -57,9 +72,44 @@ const markdownPreview = (markdown) => String(markdown || "").split("\n").map((li
   return <p key={index}>{line}</p>;
 });
 
-function Notice({ error, message }) {
+const navItems = [
+  { id: "overview", label: "知识库总览", icon: "layout" },
+  { id: "resources", label: "资料库", icon: "file" },
+  { id: "wiki", label: "Wiki", icon: "book" },
+  { id: "retrieval", label: "检索问答", icon: "search" },
+  { id: "review", label: "待审核", icon: "check" },
+  { id: "tasks", label: "任务与记录", icon: "activity" }
+];
+
+function Icon({ name, size = 19 }) {
+  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+    {name === "book" && <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v17H6.5A2.5 2.5 0 0 0 4 22z" /><path d="M4 5.5v16" /><path d="M8 7h8M8 11h8" /></>}
+    {name === "layout" && <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M9 9v11" /></>}
+    {name === "file" && <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v5h5M9 13h6M9 17h6" /></>}
+    {name === "search" && <><circle cx="10.8" cy="10.8" r="6.3" /><path d="m16 16 4.5 4.5" /></>}
+    {name === "check" && <><circle cx="12" cy="12" r="8.5" /><path d="m8.5 12 2.3 2.4 4.8-5" /></>}
+    {name === "activity" && <><path d="M4 17h3l2-8 3 11 2-7 2 4h4" /></>}
+    {name === "settings" && <><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.8 1.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-2.6V20a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-1.8-1.8.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H6v-2.6h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1 1.8-1.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V5h2.6v.2a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.8 1.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v2.6h-.2a1.7 1.7 0 0 0-1.6 1z" /></>}
+    {name === "menu" && <><path d="M4 6h16M4 12h16M4 18h16" /></>}
+    {name === "chevron-down" && <path d="m7 9 5 5 5-5" />}
+    {name === "chevron-right" && <path d="m9 6 6 6-6 6" />}
+    {name === "chevron-left" && <path d="m15 6-6 6 6 6" />}
+    {name === "plus" && <><path d="M12 5v14M5 12h14" /></>}
+    {name === "upload" && <><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M5 15v4h14v-4" /></>}
+    {name === "refresh" && <><path d="M20 11a8 8 0 0 0-14.7-4L4 9" /><path d="M4 4v5h5" /><path d="M4 13a8 8 0 0 0 14.7 4L20 15" /><path d="M20 20v-5h-5" /></>}
+    {name === "close" && <><path d="m6 6 12 12M18 6 6 18" /></>}
+    {name === "external" && <><path d="M14 4h6v6M20 4l-9 9" /><path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" /></>}
+    {name === "quote" && <><path d="M7 17H4v-4a4 4 0 0 1 4-4h1v3H8a1 1 0 0 0-1 1zM17 17h-3v-4a4 4 0 0 1 4-4h1v3h-1a1 1 0 0 0-1 1z" /></>}
+    {name === "edit" && <><path d="m4 16-.7 4.7L8 20l10.8-10.8a2.1 2.1 0 0 0-3-3z" /><path d="m14.5 7.5 2 2" /></>}
+    {name === "history" && <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5" /><path d="M4 4v4.5h4.5M12 8v4l2.7 1.6" /></>}
+    {name === "hard-drive" && <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 15h18M7 10h.01M10 10h.01" /></>}
+    {name === "alert" && <><path d="m12 3 9 17H3z" /><path d="M12 9v4M12 17h.01" /></>}
+  </svg>;
+}
+
+function Notice({ error, message, onDismiss }) {
   if (!error && !message) return null;
-  return <div className={error ? "notice error" : "notice"}>{error || message}</div>;
+  return <div className={error ? "notice error" : "notice"} role={error ? "alert" : "status"}><Icon name={error ? "alert" : "check"} size={17} /><span>{error || message}</span>{onDismiss && <button className="notice-close" type="button" onClick={onDismiss} aria-label="关闭提示"><Icon name="close" size={17} /></button>}</div>;
 }
 
 export default function Page() {
@@ -103,11 +153,31 @@ export default function Page() {
   const [mountPageId, setMountPageId] = useState("");
   const [editingPlanItemId, setEditingPlanItemId] = useState(null);
   const [planEditDraft, setPlanEditDraft] = useState(null);
+  const [expandedWikiPageIds, setExpandedWikiPageIds] = useState([]);
+  const [wikiTab, setWikiTab] = useState("read");
+  const [drawer, setDrawer] = useState(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [wikiDirectoryOpen, setWikiDirectoryOpen] = useState(true);
+  const [resourceFilter, setResourceFilter] = useState("");
+  const [resourceStatusFilter, setResourceStatusFilter] = useState("all");
+  const [uploadQueue, setUploadQueue] = useState([]);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadDropActive, setUploadDropActive] = useState(false);
 
   const allPages = useMemo(() => flattenPages(wiki?.pages), [wiki]);
   const resourceVersionIds = useMemo(() => new Set(resources.flatMap((resource) => (resource.versions || []).map((version) => version.id))), [resources]);
   const treeSourceCount = selectedResourceVersionIds.length + selectedWikiPageIds.length;
   const visibleTasks = useMemo(() => tasks.filter((task) => resourceVersionIds.has(task.resourceVersionId || task.resource_version_id)).slice(0, 8), [resourceVersionIds, tasks]);
+  const ordinaryPages = useMemo(() => allPages.filter((item) => !item.system), [allPages]);
+  const filteredResources = useMemo(() => resources.filter((resource) => {
+    const matchesText = !resourceFilter.trim() || resource.name.toLowerCase().includes(resourceFilter.trim().toLowerCase());
+    const matchesStatus = resourceStatusFilter === "all" || resource.status === resourceStatusFilter;
+    return matchesText && matchesStatus;
+  }), [resources, resourceFilter, resourceStatusFilter]);
+  const reviewCount = impacts.length + agentPlan.filter((item) => item.reviewStatus === "proposed" && item.applicationStatus === "pending").length;
+  const actionableUploadCount = uploadQueue.filter((item) => ["queued", "error"].includes(item.status)).length;
+  const uploadSuccessCount = uploadQueue.filter((item) => item.status === "success").length;
+  const uploadFailureCount = uploadQueue.filter((item) => ["error", "invalid"].includes(item.status)).length;
 
   useEffect(() => {
     const available = new Set(resources.map((resource) => resource.currentVersion?.id).filter(Boolean));
@@ -167,7 +237,8 @@ export default function Page() {
       setCompareVersionId("");
       setDiff(null);
       setSourcePreview(null);
-      setView("page");
+      setView("wiki");
+      setWikiTab("read");
       setError("");
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
@@ -191,13 +262,43 @@ export default function Page() {
   }, [selected?.id]);
 
   useEffect(() => {
-    if (view === "page" && page && !allPages.some((item) => item.id === page.id)) {
+    if (view === "wiki" && page && !allPages.some((item) => item.id === page.id)) {
       setPage(null);
       setView("overview");
     }
   }, [allPages, page, view]);
 
+  useEffect(() => {
+    if (!page?.id) return;
+    const byId = new Map(ordinaryPages.map((item) => [item.id, item]));
+    const ancestors = [];
+    let current = byId.get(page.id);
+    const seen = new Set();
+    while (current?.parentPageId && !seen.has(current.parentPageId)) {
+      seen.add(current.parentPageId);
+      ancestors.push(current.parentPageId);
+      current = byId.get(current.parentPageId);
+    }
+    setExpandedWikiPageIds((currentIds) => [...new Set([...currentIds, ...ancestors])]);
+  }, [ordinaryPages, page?.id]);
+
+  useEffect(() => {
+    if (!drawer) return undefined;
+    const closeOnEscape = (event) => { if (event.key === "Escape") setDrawer(null); };
+    document.addEventListener("keydown", closeOnEscape);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", closeOnEscape);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [drawer]);
+
   const selectBase = (base) => {
+    if (uploadBusy) {
+      setError("批量上传进行中，请等待当前批次完成后再切换知识库");
+      return;
+    }
     setSelected(base);
     setPage(null);
     setView("overview");
@@ -214,10 +315,19 @@ export default function Page() {
     setMountPageId("");
     setEditingPlanItemId(null);
     setPlanEditDraft(null);
+    setExpandedWikiPageIds([]);
+    setWikiTab("read");
+    setDrawer(null);
+    setUploadQueue([]);
+    setUploadDropActive(false);
   };
 
   const createBase = async (event) => {
     event.preventDefault();
+    if (uploadBusy) {
+      setError("批量上传进行中，请等待当前批次完成后再创建知识库");
+      return;
+    }
     const form = event.currentTarget;
     const name = new FormData(form).get("name");
     try {
@@ -225,6 +335,8 @@ export default function Page() {
       form.reset();
       setMessage("知识库已创建");
       await loadBases();
+      setUploadQueue([]);
+      setUploadDropActive(false);
       setSelected(body.data);
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
@@ -283,6 +395,7 @@ export default function Page() {
   };
 
   const openCitation = async (citation) => {
+    setDrawer({ kind: "citation", citation });
     if (!citation.source?.previewPath) return;
     try {
       const body = await request(citation.source.previewPath);
@@ -310,25 +423,84 @@ export default function Page() {
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
 
+  const queueUploadFiles = (fileList) => {
+    if (uploadBusy) return;
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const incomingKeys = new Set();
+    const additions = files.reduce((result, file) => {
+      const fileKey = uploadFileKey(file);
+      if (incomingKeys.has(fileKey)) return result;
+      incomingKeys.add(fileKey);
+      const valid = isSupportedUploadFile(file);
+      result.push({ id: createUploadId(), idempotencyKey: createUploadId(), file, fileKey, status: valid ? "queued" : "invalid", error: valid ? "" : "仅支持 Markdown、TXT 和 PDF 文件" });
+      return result;
+    }, []);
+    setUploadQueue((current) => {
+      const existingKeys = new Set(current.map((item) => item.fileKey));
+      return [...current, ...additions.filter((item) => !existingKeys.has(item.fileKey))];
+    });
+    setError("");
+    setMessage("");
+  };
+
+  const handleUploadInput = (event) => {
+    queueUploadFiles(event.currentTarget.files);
+    event.currentTarget.value = "";
+  };
+
+  const handleUploadDrop = (event) => {
+    event.preventDefault();
+    setUploadDropActive(false);
+    queueUploadFiles(event.dataTransfer.files);
+  };
+
+  const removeUploadItem = (itemId) => {
+    if (uploadBusy) return;
+    setUploadQueue((current) => current.filter((item) => item.id !== itemId));
+  };
+
+  const clearUploadQueue = () => {
+    if (uploadBusy) return;
+    setUploadQueue([]);
+    setError("");
+    setMessage("");
+  };
+
   const importResource = async (event) => {
     event.preventDefault();
-    if (!selected) return;
-    const form = event.currentTarget;
-    const file = form.file.files[0];
-    if (!file) return;
-    const payload = new FormData();
-    payload.set("name", file.name);
-    payload.set("knowledgeBaseId", selected.id);
-    payload.set("file", file);
-    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-    payload.set("ocrMode", isPdf ? "auto" : "off");
-    payload.set("ocrProvider", isPdf ? "paddleocr" : "local");
-    try {
-      await request("/api/resources", { method: "POST", body: payload });
-      form.reset();
-      await loadWorkspace(selected.id);
-      setMessage("原始资料已加入索引队列；原文保持只读");
-    } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
+    if (!selected || uploadBusy) return;
+    const pendingItems = uploadQueue.filter((item) => ["queued", "error"].includes(item.status));
+    if (!pendingItems.length) return;
+    setUploadBusy(true);
+    setError("");
+    setMessage("");
+    let succeeded = 0;
+    let failed = 0;
+    // ponytail: uploads stay sequential to keep the local API/SQLite worker predictable; upgrade to bounded parallelism when large batches need throughput.
+    for (const item of pendingItems) {
+      setUploadQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "uploading", error: "" } : candidate));
+      const payload = new FormData();
+      payload.set("name", item.file.name);
+      payload.set("knowledgeBaseId", selected.id);
+      payload.set("file", item.file);
+      const isPdf = item.file.type === "application/pdf" || item.file.name.toLowerCase().endsWith(".pdf");
+      payload.set("ocrMode", isPdf ? "auto" : "off");
+      payload.set("ocrProvider", isPdf ? "paddleocr" : "local");
+      try {
+        await request("/api/resources", { method: "POST", body: payload, headers: { "idempotency-key": item.idempotencyKey } });
+        succeeded += 1;
+        setUploadQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "success", error: "" } : candidate));
+      } catch (caught) {
+        failed += 1;
+        const uploadError = `${caught.code || "NETWORK_ERROR"}: ${caught.message || "上传失败"}`;
+        setUploadQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "error", error: uploadError } : candidate));
+      }
+    }
+    await loadWorkspace(selected.id);
+    setUploadBusy(false);
+    if (failed) setError(`${failed} 个文件上传失败，请检查列表后重试${succeeded ? `；${succeeded} 个文件已成功加入处理队列` : ""}`);
+    else setMessage(`${succeeded} 个文件已加入处理队列，原始文件保持只读`);
   };
 
   const appendResourceVersion = async (event, resource) => {
@@ -603,181 +775,460 @@ export default function Page() {
     return () => { cancelled = true; clearInterval(timer); };
   }, [agentRun?.id]);
 
-  const renderWikiTree = (nodes, depth = 0) => (nodes || []).filter((item) => !item.system).map((item) => <div className="wiki-tree-node" key={item.id}>
-    <div className="wiki-tree-row">
-      <input type="checkbox" checked={selectedWikiPageIds.includes(item.id)} onChange={() => toggleWikiPage(item.id)} aria-label={`Use ${item.title} as Agent source`} />
-      <button className={`tree-item ${page?.id === item.id ? "selected" : ""}`} style={{ paddingLeft: `${8 + depth * 14}px` }} onClick={() => loadPage(item.id)}><span className="page-type">{item.pageType.slice(0, 1).toUpperCase()}</span><span>{item.title}</span>{item.pendingCitationCount > 0 && <b className="warning-count">{item.pendingCitationCount}</b>}</button>
-    </div>
-    {renderWikiTree(item.children, depth + 1)}
-  </div>);
 
-  const currentCitationCount = page?.currentVersion?.citations?.length || 0;
+  const guardEditorExit = () => {
+    const currentMarkdown = page?.currentVersion?.contentMarkdown || "";
+    const dirty = wikiTab === "edit" && (
+      contentDraft !== currentMarkdown ||
+      titleDraft !== (page?.title || "") ||
+      slugDraft !== (page?.slug || "") ||
+      spaceDraft !== (page?.spaceId || "") ||
+      parentDraft !== (page?.parentPageId || "")
+    );
+    return !dirty || typeof window === "undefined" || window.confirm("当前页面有未保存修改，确定离开吗？");
+  };
 
-  return <div className="app-shell">
-    <header className="topbar" data-testid="personal-runtime">
-      <div className="runtime-status" data-testid="runtime-status" style={{ maxWidth: 420, color: "#ffd48a", fontSize: 10, lineHeight: 1.35 }}>{runtime ? `${runtime.model.provider} / ${runtime.model.model} · ${runtime.embedding.provider} / ${runtime.embedding.model} · ${runtime.egressWarning}` : "运行配置加载中"}</div>
-      <div><span className="eyebrow">MYKNOW</span><h1>知识工作台</h1></div>
-      <div className="topbar-state">{selected ? `当前知识库：${selected.name}` : "从知识库开始"}</div>
-      <button className="ghost-button" onClick={() => loadWorkspace(selected?.id)}>刷新</button>
-    </header>
-    <Notice error={error} message={message} />
-    <main className="workspace">
-      <aside className="rail left-rail">
-        <section className="rail-section">
-          <div className="section-heading"><h2>知识库</h2><span>{bases.length}</span></div>
-          <form className="inline-form" onSubmit={createBase}><input name="name" placeholder="新知识库名称" required /><button>创建</button></form>
-          <div className="base-list">{bases.map((base) => <button className={`base-item ${selected?.id === base.id ? "selected" : ""}`} key={base.id} onClick={() => selectBase(base)}><span className="base-dot" />{base.name}<small>{base.wikiDefaultMode === "retrieval-only" ? "只读检索" : "Wiki"}</small></button>)}</div>
-          {!bases.length && !loading && <p className="muted">还没有知识库。</p>}
-        </section>
-        {selected && <section className="rail-section tree-section">
-          <div className="section-heading"><h2>Wiki 页面</h2><span>{wiki?.pageCount || 0}</span></div>
-          <button className={`tree-item system ${view === "overview" ? "selected" : ""}`} onClick={() => { setView("overview"); setPage(null); }}><span>⌂</span>index / overview</button>
-          <button className={`tree-item system ${view === "log" ? "selected" : ""}`} onClick={() => { setView("log"); setPage(null); }}><span>≡</span>log / events</button>
-          {renderWikiTree(wiki?.pages)}
-          {!allPages.some((item) => !item.system) && <p className="muted tree-empty">Wiki 还是空的，先创建一个页面。</p>}
-          <form className="create-page" onSubmit={createPage}><input name="title" placeholder="新页面标题" required /><input name="slug" placeholder="slug（可选）" pattern="[a-z0-9](?:[a-z0-9-]{0,158}[a-z0-9])?" /><select name="pageType" defaultValue="concept">{pageTypes.map((type) => <option key={type}>{type}</option>)}</select><select name="spaceId" defaultValue=""><option value="">不指定空间</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select><select name="parentPageId" defaultValue=""><option value="">顶层页面</option>{allPages.filter((item) => !item.system).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select><button>新建 Wiki 页面</button></form>
-        </section>}
-        {selected && <section className="rail-section workspace-labels"><div className="section-heading"><h2>Workspace labels</h2><span>{spaces.length} spaces · {tags.length} tags</span></div><form className="inline-form" onSubmit={(event) => createWorkspaceLabel(event, "space")}><input name="name" placeholder="新空间" required /><button>创建空间</button></form><form className="inline-form" onSubmit={(event) => createWorkspaceLabel(event, "tag")}><input name="name" placeholder="新标签" required /><button>创建标签</button></form></section>}
-        {selected && <section className="rail-section agent-launcher">
-          <div className="section-heading"><h2>Agent 工作台</h2><span>{agentRun?.status || "idle"}</span></div>
-          <p className="muted">聊天只读；Wiki 整理先生成计划，审阅后才会写入。</p>
-          <div className="agent-scope-summary">
-            <div><b>Tree scope</b><span>{treeSourceCount} selected source(s)</span></div>
-            <button type="button" onClick={selectAllCurrentResources} disabled={!resources.some((resource) => resource.currentVersion?.id)}>Select all current resources</button>
-            <label>Mount under
-              <select value={mountPageId} onChange={(event) => setMountPageId(event.target.value)}>
-                <option value="">Top-level root</option>
-                {allPages.filter((item) => !item.system).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-              </select>
+  const navigate = (nextView) => {
+    if (nextView !== "wiki" && !guardEditorExit()) return;
+    setView(nextView);
+    setMobileNavOpen(false);
+    if (nextView === "overview") setPage(null);
+    if (nextView === "wiki" && !page && ordinaryPages[0]) loadPage(ordinaryPages[0].id);
+  };
+
+  const selectWikiPage = (pageId) => {
+    if (!guardEditorExit()) return;
+    loadPage(pageId);
+  };
+
+  const switchWikiTab = (nextTab) => {
+    if (nextTab !== "edit" && !guardEditorExit()) return;
+    setWikiTab(nextTab);
+  };
+
+  const toggleWikiBranch = (pageId) => {
+    setExpandedWikiPageIds((current) => current.includes(pageId) ? current.filter((id) => id !== pageId) : [...current, pageId]);
+  };
+
+  const closeDrawer = () => {
+    setDrawer(null);
+    setSourcePreview(null);
+  };
+
+  const openResource = (resource) => setDrawer({ kind: "resource", resource });
+  const openRetrievalTrace = () => setDrawer({ kind: "retrieval", retrieval });
+  const openAgentTrace = () => setDrawer({ kind: "agent", agentRun, agentEvents });
+  const openSettings = () => setDrawer({ kind: "settings" });
+
+  const spaceName = (spaceId) => spaces.find((space) => space.id === spaceId)?.name || "未指定空间";
+  const statusLabel = (status) => <span className={"status-tag " + (status || "")}>{statusText[status] || status || "未知状态"}</span>;
+
+  const renderWikiTree = (nodes, depth = 0) => {
+    const visibleNodes = (nodes || []).filter((item) => !item.system);
+    if (!visibleNodes.length) return null;
+    return <ul className={depth ? "wiki-tree-children" : "wiki-tree-list"}>
+      {visibleNodes.map((item) => {
+        const children = (item.children || []).filter((child) => !child.system);
+        const hasChildren = children.length > 0;
+        const expanded = expandedWikiPageIds.includes(item.id);
+        return <li key={item.id}>
+          <div className="wiki-node" style={{ paddingLeft: Math.min(depth, 5) * 4 }}>
+            {hasChildren ? <button className="icon-btn tree-toggle" type="button" aria-expanded={expanded} aria-label={(expanded ? "折叠 " : "展开 ") + item.title} title={expanded ? "折叠页面分支" : "展开页面分支"} onClick={() => toggleWikiBranch(item.id)}><Icon name="chevron-right" size={17} /></button> : <span className="tree-spacer" aria-hidden="true" />}
+            <label className="tree-checkbox" title="选择为 Agent 整理来源">
+              <input type="checkbox" checked={selectedWikiPageIds.includes(item.id)} onChange={() => toggleWikiPage(item.id)} aria-label={"选择 " + item.title + " 作为 Agent 来源"} />
             </label>
-            <small>Tick resource cards or Wiki pages in the left tree. The generated root is new and is never index/log.</small>
+            <button className="wiki-select" type="button" aria-current={page?.id === item.id ? "page" : undefined} onClick={() => selectWikiPage(item.id)}>
+              <span className="page-type">{(item.pageType || "concept").slice(0, 1).toUpperCase()}</span>
+              <span className="wiki-node-title">{item.title}</span>
+              {item.pendingCitationCount > 0 && <span className="warning-count">{item.pendingCitationCount}</span>}
+            </button>
           </div>
-          <div className="agent-launch-actions">
-            <button className="primary-button" onClick={createChatSession}>打开聊天</button>
-            <button disabled={!treeSourceCount || agentBusy} onClick={startOrganizePlan}>{agentBusy ? "排队中…" : "生成整理计划"}</button>
-          </div>
-          {!treeSourceCount && <small className="agent-hint">至少勾选一个已索引资料版本或 Wiki 页面后再生成树形计划。</small>}
-        </section>}
-      </aside>
+          {hasChildren && expanded && renderWikiTree(children, depth + 1)}
+        </li>;
+      })}
+    </ul>;
+  };
 
-      <section className="main-panel">
-        {!selected && <div className="empty-state large"><span className="icon">◎</span><h2>选择或创建一个知识库</h2><p>Wiki 会成为默认入口，原始资料仍作为可追溯的检索底座。</p></div>}
-        {selected && view === "overview" && <>
-          <div className="panel-header"><div><span className="eyebrow">WIKI / INDEX</span><h2>Wiki overview</h2><p>从稳定页面、来源引用和待复核影响项开始工作。</p></div><span className="mode-pill">{selected.wikiDefaultMode === "retrieval-only" ? "知识库：retrieval-only" : "知识库：wiki-enabled"}</span></div>
-          <div className="overview-grid">
-            <article className="overview-card hero-card"><span className="card-label">默认入口</span><strong>index / overview</strong><p>刷新后仍从 Wiki 进入。页面内容以 Markdown 版本保存，原始资料不会被覆盖。</p><div className="stat-row"><span><b>{wiki?.pageCount || 0}</b> 个页面</span><span><b>{wiki?.pendingCitationCount || 0}</b> 个待处理引用</span></div></article>
-            <article className="overview-card"><span className="card-label">Wiki 整理候选</span>{wiki?.candidates?.length ? wiki.candidates.slice(0, 5).map((item) => <div className="candidate" key={item.id}><span>{item.name}</span><small>{statusText[item.status] || item.status}</small></div>) : <div className="empty-card"><b>暂无候选资料</b><span>导入资料后会出现在这里。</span></div>}</article>
-            <article className="overview-card"><span className="card-label">系统日志</span><div className="log-preview">{(wiki?.log?.events || []).slice(0, 5).map((event) => <div key={event.id}><b>{event.event_type}</b><span>{event.entity_type}</span><time>{new Date(event.created_at).toLocaleTimeString()}</time></div>)}</div></article>
-          </div>
-          <section className="retrieval-panel">
-            <div className="card-title-row"><div><h3>Retrieval checker</h3><span className="retrieval-subtitle">Page-centric RAG · no answer generation</span></div><span>{retrieval ? `trace ${retrieval.traceId.slice(0, 8)}` : "not run"}</span></div>
-            <form className="retrieval-form" onSubmit={runRetrieval}>
-              <input name="query" required placeholder="Ask the knowledge base to retrieve evidence" />
-              <select name="spaceId" defaultValue=""><option value="">All Wiki spaces</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select>
-              <input name="wikiTopK" type="number" min="1" max="20" defaultValue="5" aria-label="Wiki Top K" />
-              <input name="rawTopK" type="number" min="1" max="20" defaultValue="10" aria-label="Raw Top K" />
-              <input name="contextBudgetTokens" type="number" min="1" max="50000" defaultValue="8000" aria-label="Context budget" />
-              <button className="primary-button" disabled={retrievalBusy}>{retrievalBusy ? "Retrieving…" : "Retrieve"}</button>
-            </form>
-            <p className="scope-note">Wiki scope: {selected.name}{spaces.length ? " · optional space filter" : ""} · Raw scope: entire knowledge base · Wiki/raw Top-K are independent.</p>
-            {retrieval && <div className="retrieval-grid">
-              <article className="retrieval-card"><div className="retrieval-heading"><b>Wiki seeds</b><span>{retrieval.wiki.seeds.length}</span></div>{retrieval.wiki.seeds.length ? retrieval.wiki.seeds.map((item) => <a className="retrieval-result" key={item.pageId} href={`${apiBase()}/api/wiki/pages/${encodeURIComponent(item.pageId)}/versions/${encodeURIComponent(item.pageVersionId)}`} target="_blank" rel="noreferrer"><span><b>{item.rank}. {item.title}</b><small>{item.page?.pageType} · score {item.normalizedScore.toFixed(2)} · {item.seedGate?.passed ? "seed passed" : `no graph: ${item.seedGate?.reason}`}</small></span><code>{item.pageVersionId.slice(0, 8)}</code></a>) : <p className="muted">No Wiki page match.</p>}</article>
-              <article className="retrieval-card"><div className="retrieval-heading"><b>Raw child chunks</b><span>{retrieval.raw.results.length}</span></div>{retrieval.raw.results.length ? retrieval.raw.results.map((item) => <a className="retrieval-result" key={item.chunkId} href={retrievalLocatorPath(item)} target="_blank" rel="noreferrer"><span><b>{item.rank}. {item.resource?.name}</b><small>{item.content.slice(0, 180)}{item.content.length > 180 ? "…" : ""}</small></span><code>{item.locator?.startOffset ?? "-"}:{item.locator?.endOffset ?? "-"}</code></a>) : <p className="muted">No raw child chunk match.</p>}</article>
-              <article className="retrieval-card"><div className="retrieval-heading"><b>Graph expansion</b><span>{retrieval.wiki.graphExpanded.length}</span></div>{retrieval.wiki.graphExpanded.length ? retrieval.wiki.graphExpanded.map((item) => <a className="retrieval-result" key={`${item.pageId}-${item.rank}`} href={`${apiBase()}/api/wiki/pages/${encodeURIComponent(item.pageId)}/versions/${encodeURIComponent(item.pageVersionId)}`} target="_blank" rel="noreferrer"><span><b>{item.hop}-hop · {item.title}</b><small>{item.path?.map((edge) => `${edge.direction} ${edge.linkText}`).join(" → ")} · decay {item.decay}</small></span><code>{item.pageId.slice(0, 8)}</code></a>) : <p className="muted">Only high-confidence Wiki seeds expand the graph.</p>}<div className="context-summary"><b>Context</b><span>{retrieval.context.estimatedTokens}/{retrieval.limits.contextBudgetTokens} tokens · {retrieval.context.truncated ? "truncated" : "within budget"}</span><small>Wiki {retrieval.context.wikiEstimatedTokens}/{retrieval.context.wikiBudgetTokens} · Raw {retrieval.context.rawEstimatedTokens}/{retrieval.context.rawBudgetTokens}</small></div></article>
-            </div>}
-          </section>
-          {wiki?.empty && <div className="callout"><div><b>Wiki 还是空的</b><p>可以先创建一页沉淀知识，也可以只查看右侧原始资料；不会被静默跳转到资料列表。</p></div><button onClick={() => document.querySelector(".create-page input")?.focus()}>创建第一篇</button></div>}
-          <div className="lower-grid"><article className="content-card"><div className="card-title-row"><h3>主题树</h3><span>稳定页面 ID</span></div>{allPages.filter((item) => !item.system).length ? <div className="topic-list">{allPages.filter((item) => !item.system).map((item) => <button key={item.id} onClick={() => loadPage(item.id)}><span className="page-type large-type">{item.pageType.slice(0, 1).toUpperCase()}</span><span><b>{item.title}</b><small>{item.slug} · {item.citationCount} 个引用</small></span><span>→</span></button>)}</div> : <p className="muted">页面创建后会在这里形成主题树。</p>}</article><article className="content-card"><div className="card-title-row"><h3>最近影响项</h3><span>{impacts.length}</span></div>{impacts.length ? impacts.slice(0, 5).map((impact) => <div className="impact-row" key={impact.citationId}><span className={`status-dot ${impact.status}`} /><div><b>{impact.page.title}</b><small>{impact.resource.name} · {statusText[impact.status]}</small></div></div>) : <p className="muted">资料更新后，旧版本引用会在这里标记。</p>}</article></div>
-        </>}
-        {selected && <section className="agent-panel" data-testid="agent-chat">
-          <div className="agent-panel-header">
-            <div><span className="eyebrow">PI AGENT / READ ONLY</span><h2>Agent chat</h2><p>当前范围：{page?.title ? `Wiki 页面「${page.title}」` : "开放对话（未附带知识库证据）"}</p></div>
-            <div className="agent-header-actions"><span className={`mode-pill ${agentRun?.status || ""}`}>{agentRun ? `run ${agentRun.status}` : "no active run"}</span><button onClick={chatSession ? () => refreshChatSession() : createChatSession}>{chatSession ? "刷新聊天" : "开始聊天"}</button></div>
-          </div>
-          <div className="chat-window" aria-live="polite">
-            {chatMessages.length ? chatMessages.map((item) => <article className={`chat-message ${item.role} ${item.status}`} key={item.id}>
-              <div className="chat-message-meta"><b>{item.role === "user" ? "你" : "Pi Agent"}</b><span>{item.status}</span></div>
-              <p>{item.content || (item.status === "pending" || item.status === "running" || item.status === "retrying" ? "正在读取范围并整理回答…" : "暂无回答")}</p>
-              {item.answer && <div className="answer-meta"><span>evidence: {item.answer.evidenceStatus || "none"}</span><span>{item.answer.evidence?.length || 0} citation(s)</span></div>}
-              {item.error && <div className="trace-warning">{item.error.code}: {item.error.message}</div>}
-            </article>) : <div className="empty-card"><b>还没有消息</b><span>可以先问一个开放问题，也可以打开 Wiki 页面后询问当前范围。</span></div>}
-          </div>
-          <form className="chat-form" onSubmit={sendChat}>
-            <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} maxLength={4000} rows={2} placeholder="向 Agent 提问；回答会区分 MyKnow 证据和模型补充…" aria-label="Chat message" />
-            <button className="primary-button" disabled={chatBusy || !chatInput.trim()}>{chatBusy ? "发送中…" : "发送"}</button>
-          </form>
-        </section>}
-        {selected && <section className="agent-panel agent-plan" data-testid="agent-plan">
-          <div className="agent-panel-header">
-            <div><span className="eyebrow">REVIEW GATE / TRANSACTIONAL WRITE</span><h2>Wiki 整理计划</h2><p>每一项都保留基线版本、引用、风险和应用状态。</p></div>
-            <button className="primary-button" disabled={!treeSourceCount || agentBusy} onClick={startOrganizePlan}>{agentBusy ? "生成中…" : "重新生成计划"}</button>
-          </div>
-          {!agentRun && <div className="empty-card"><b>尚未生成计划</b><span>先勾选明确的资料版本或 Wiki 页面，Agent 只能通过审阅计划申请写入。</span></div>}
-          {agentRun && !agentPlan.length && <div className="empty-card"><b>计划正在生成</b><span>run {agentRun.id.slice(0, 8)} · {agentRun.status}</span></div>}
-          {agentPlan.length > 0 && <div className="plan-summary"><b>Plan status: {agentPlanStatus}</b><span>{agentPlan.filter((item) => item.applicationStatus === "applied").length}/{agentPlan.length} applied · citation policy: {agentRun?.citationPolicy || "required"} · {agentPlan.reduce((count, item) => count + (item.validationWarnings?.length || 0), 0)} warning(s)</span></div>}
-          {agentPlan.map((item) => {
-            const isTreeNode = Boolean(item.nodeId);
-            const isRoot = isTreeNode && !item.parentNodeId;
-            const isEditing = editingPlanItemId === item.id;
-            return <article className="plan-item" style={{ marginLeft: `${planDepth(item, agentPlan) * 18}px` }} key={item.id}>
-              <div className="plan-item-header"><div><b>{item.nodeRole || item.itemType}</b><small>{isTreeNode ? `node ${item.nodeId} · parent ${item.parentNodeId || "top-level"}` : `target ${item.targetPageId?.slice(0, 8) || "new page"}`} · risk {item.risk}</small></div><span className={`plan-status ${item.applicationStatus}`}>{item.applicationStatus}</span></div>
-              {isEditing ? <div className="plan-edit-form"><input value={planEditDraft?.title || ""} onChange={(event) => setPlanEditDraft((current) => ({ ...current, title: event.target.value }))} maxLength={200} /><select value={planEditDraft?.pageType || "concept"} onChange={(event) => setPlanEditDraft((current) => ({ ...current, pageType: event.target.value }))}>{pageTypes.map((type) => <option key={type}>{type}</option>)}</select><textarea value={planEditDraft?.contentMarkdown || ""} onChange={(event) => setPlanEditDraft((current) => ({ ...current, contentMarkdown: event.target.value }))} maxLength={120000} rows={6} /><div className="plan-actions"><button className="primary-button" onClick={() => savePlanEdit(item)}>保存编辑</button><button onClick={() => { setEditingPlanItemId(null); setPlanEditDraft(null); }}>取消</button></div></div> : <><h3>{item.proposed?.title || "Untitled proposal"}</h3>{item.proposed?.contentMarkdown && <pre className="plan-content">{item.proposed.contentMarkdown.slice(0, 1600)}</pre>}</>}
-              {item.diff?.lines?.length > 0 && <pre className="plan-diff">{item.diff.lines.slice(0, 80).map((line) => `${line.type === "added" ? "+" : line.type === "removed" ? "-" : " "} ${line.value}`).join("\n")}</pre>}
-              <div className="plan-evidence"><span>{item.evidenceStatus}</span><span>{item.citations?.length || 0} citation(s)</span><span>{item.reviewStatus}</span></div>
-              {item.validationWarnings?.length > 0 && <div className="trace-warning">{item.validationWarnings.map((warning, index) => <div key={`${warning.code}-${warning.citationIndex ?? "missing"}-${index}`}>{warning.code}: {warning.message}</div>)}</div>}
-              {item.error && <div className="trace-warning">{item.error.code}: {item.error.message}</div>}
-              <div className="plan-actions">
-                {item.reviewStatus === "proposed" && item.applicationStatus === "pending" && <>{item.evidenceStatus === "needs_evidence" ? <span className="plan-blocked">需要补充证据后才能应用</span> : isTreeNode && isRoot ? <button className="primary-button" onClick={() => decidePlanBranch(item, "approve")}>审阅并应用整棵分支</button> : <button className="primary-button" onClick={() => decidePlanItem(item, "approve")}>审阅并应用</button>}<button onClick={() => decidePlanBranch(item, "reject")}>拒绝{isTreeNode ? "分支" : ""}</button>{!isEditing && <button onClick={() => beginPlanEdit(item)}>编辑</button>}</>}
-                {item.applicationStatus === "applied" && <button onClick={() => rollbackPlanItem(item)}>回滚</button>}
-              </div>
-            </article>;
-          })}
-        </section>}
-        {selected && view === "log" && <div className="log-page">
-          <div className="panel-header"><div><span className="eyebrow">WIKI / LOG</span><h2>Audit log</h2><p>页面、版本、引用和影响扫描都保留可追溯记录。</p></div><span className="mode-pill">最近 100 条</span></div>
-          <div className="log-table">{(wiki?.log?.events || []).map((event) => <div className="log-row" key={event.id}><time>{new Date(event.created_at).toLocaleString()}</time><b>{event.event_type}</b><span>{event.entity_type} / {event.entity_id.slice(0, 8)}</span><small>{JSON.stringify(event.metadata || {})}</small></div>)}{!wiki?.log?.events?.length && <p className="muted">暂无审计事件。</p>}</div>
-        </div>}
-        {selected && view === "page" && page && <>
-          <div className="panel-header page-header"><div className="page-heading"><span className="eyebrow">{page.pageType} / {page.slug}</span><input className="title-input" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onBlur={saveMetadata} /><div className="metadata-grid"><label>slug<input value={slugDraft} onChange={(event) => setSlugDraft(event.target.value)} onBlur={saveMetadata} /></label><label>空间<select value={spaceDraft} onChange={(event) => setSpaceDraft(event.target.value)} onBlur={saveMetadata}><option value="">不指定空间</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label><label>父页面<select value={parentDraft} onChange={(event) => setParentDraft(event.target.value)} onBlur={saveMetadata}><option value="">顶层页面</option>{allPages.filter((item) => !item.system && item.id !== page.id).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label></div><p>页面 ID：{page.id}</p></div><div className="page-actions"><span className="mode-pill">v{versions.length}</span><button className="primary-button" onClick={savePage}>保存新版本</button></div></div>
-          <div className="editor-tabs"><button className="active">编辑</button><button onClick={() => setContentDraft(page.currentVersion?.contentMarkdown || "")}>Markdown</button><label>模板版本 <code>{page.currentVersion?.templateVersionId?.slice(0, 8) || "—"}</code></label></div>
-          <div className="editor-layout"><div className="editor-column"><textarea className="markdown-editor" value={contentDraft} onChange={(event) => setContentDraft(event.target.value)} spellCheck={false} /><div className="editor-foot"><span>每次保存都会生成不可变版本</span><span>{contentDraft.length.toLocaleString()} 字符</span></div></div><article className="preview-column"><div className="preview-label">预览</div><div className="markdown-preview">{markdownPreview(contentDraft)}</div></article></div>
-          <section className="versions-section"><div className="card-title-row"><h3>版本与 diff</h3><span>旧版本不会被覆盖</span></div><div className="version-list">{versions.map((version, index) => <div className={`version-row ${version.id === page.currentVersionId ? "current" : ""}`} key={version.id}><div><b>{version.id === page.currentVersionId ? "当前版本" : `版本 ${versions.length - index}`}</b><small>{new Date(version.created_at || version.createdAt).toLocaleString()} · {version.change_summary || version.changeSummary || "无说明"}</small></div><div className="version-actions"><button onClick={() => showDiff(version.id)} disabled={version.id === page.currentVersionId}>查看 diff</button>{version.id !== page.currentVersionId && <button onClick={() => restore(version.id)}>恢复为新版本</button>}</div></div>)}</div>{diff && <div className="diff-box"><div className="diff-header"><b>diff：{compareVersionId.slice(0, 8)} → 当前</b><button onClick={() => setDiff(null)}>关闭</button></div><pre>{diff.lines.map((line, index) => <span className={line.type} key={index}>{line.type === "added" ? "+ " : line.type === "removed" ? "- " : "  "}{line.value}{"\n"}</span>)}</pre></div>}</section>
-        </>}
+  const renderOverview = () => <div className="view-stack">
+    <header className="page-head">
+      <div>
+        <span className="eyebrow">WORKSPACE / INDEX</span>
+        <h1>知识库总览</h1>
+        <p>从稳定 Wiki 页面、来源引用和待处理影响项开始工作。原始资料始终保留为可追溯底座。</p>
+      </div>
+      <div className="page-head-actions">
+        <button className="btn btn-primary" type="button" onClick={() => navigate("wiki")}><Icon name="book" size={17} />打开 Wiki</button>
+        <button className="btn btn-secondary" type="button" onClick={() => loadWorkspace(selected?.id)}><Icon name="refresh" size={17} />刷新</button>
+      </div>
+    </header>
+
+    <section className="stats-grid" aria-label="知识库统计">
+      <div className="stat"><span className="stat-num">{wiki?.pageCount || ordinaryPages.length}</span><span className="stat-label">Wiki 页面</span></div>
+      <div className="stat"><span className="stat-num">{resources.length}</span><span className="stat-label">原始资料</span></div>
+      <div className="stat"><span className="stat-num">{impacts.length}</span><span className="stat-label">需要关注</span></div>
+      <div className="stat"><span className="stat-num">{tasks.length}</span><span className="stat-label">处理任务</span></div>
+    </section>
+
+    <div className="overview-columns">
+      <section className="section-block">
+        <div className="section-lead"><div><h2>继续阅读</h2><p>Wiki 页面按自己的版本链保存，切换页面不会混用版本。</p></div><span className="meta">{selected?.wikiDefaultMode === "retrieval-only" ? "仅检索" : "Wiki 可写入"}</span></div>
+        <button className="continue-reading" type="button" onClick={() => navigate("wiki")}>
+          <span><strong>{page?.title || ordinaryPages[0]?.title || "还没有 Wiki 页面"}</strong><small>{page ? "当前页面 · v" + versions.length : "创建第一篇页面，开始沉淀知识"}</small></span>
+          <Icon name="chevron-right" size={19} />
+        </button>
+        {wiki?.empty && <div className="article-note"><Icon name="alert" size={18} /><span>Wiki 还是空的。可以先创建页面，也可以打开资料库导入原始材料；系统不会静默替你跳转或生成内容。</span></div>}
       </section>
 
-      <aside className="rail right-rail">
-        {selected && <>
-          <section className="rail-section"><div className="section-heading"><h2>来源与引用</h2><span>{currentCitationCount}</span></div>{page?.currentVersion?.citations?.length ? page.currentVersion.citations.map((citation) => <div className="citation-card" key={citation.id}><div className="citation-status"><span className={`status-dot ${citation.status}`} />{statusText[citation.status] || citation.status}</div><b>{citation.source?.resourceName || "来源不可用"}</b><small>版本 {citation.resourceVersionId.slice(0, 8)}</small><small>locator：{JSON.stringify(citation.locator)}</small>{citation.source && <><button className="citation-link" onClick={() => openCitation(citation)}>查看原文定位</button>{sourcePreview?.citationId === citation.id && <pre className="source-preview">{sourcePreview.snippet || "该文件类型暂无文本预览，请打开只读原文。"}</pre>}<a href={`${apiBase()}${citation.source.downloadPath}`} target="_blank" rel="noreferrer">打开只读原文 ↗</a></>}</div>) : <p className="muted">打开页面后，这里会显示绑定到具体资料版本的引用。</p>}</section>
-          <section className="rail-section"><div className="section-heading"><h2>处理任务</h2><span>{visibleTasks.length}</span></div>{visibleTasks.length ? visibleTasks.map((task) => <div className="task-row" key={task.id}><div><b>{task.type}</b><small>{statusText[task.status] || task.status} · {task.progress ?? 0}%</small>{task.errorSummary && <small>{task.errorSummary}</small>}</div><span className={`task-status ${task.status}`}>{statusText[task.status] || task.status}</span></div>) : <p className="muted">暂无资料处理任务。</p>}</section>
-          {retrieval && <section className="rail-section retrieval-trace"><div className="section-heading"><h2>检索 trace</h2><span>{retrieval.vector.status}</span></div><div className="trace-line"><b>Scope</b><span>{retrieval.scope.knowledgeBaseId.slice(0, 8)} · raw = whole KB</span></div><div className="trace-line"><b>Vector</b><span>{retrieval.vector.provider} / {retrieval.vector.model} · {retrieval.vector.durationMs}ms</span></div>{retrieval.vector.error && <div className="trace-warning">关键词降级：{retrieval.vector.error.code}</div>}<div className="trace-line"><b>Provenance</b><span>{retrieval.provenance.length} lookup(s)</span></div><div className="trace-line"><b>Timing</b><span>{retrieval.metrics.durationMs}ms · trace {retrieval.traceId.slice(0, 8)}</span></div>{retrieval.context.truncated && <div className="trace-warning">Context budget truncated {retrieval.context.truncatedItems.length} item(s)</div>}</section>}
-          {agentRun && <section className="rail-section agent-trace"><div className="section-heading"><h2>Agent trace</h2><span>{agentEvents.length} events</span></div><div className="trace-line"><b>Provider</b><span>{agentRun.provider} / {agentRun.model}</span></div><div className="trace-line"><b>Egress</b><span>{agentRun.egressMode}</span></div><div className="trace-line"><b>Citation policy</b><span>{agentRun.citationPolicy || "required"}</span></div><div className="trace-line"><b>Status</b><span>{agentRun.status}</span></div><div className="trace-line"><b>Scope</b><span>{agentRun.scope?.knowledgeBaseId ? `${agentRun.scope.knowledgeBaseId.slice(0, 8)} · snapshot` : "open chat"}</span></div>{agentRun.error && <div className="trace-warning">{agentRun.error.code}: {agentRun.error.message}</div>}<div className="event-list">{agentEvents.slice(-6).map((event) => <div className="event-row" key={event.id}><b>{event.eventType}</b><span>{event.toolName || event.stage || "agent"}</span></div>)}</div></section>}
-          {page && resources.some((resource) => resource.versions?.length) && <section className="rail-section"><div className="section-heading"><h2>绑定引用</h2><span>版本级</span></div><form className="citation-form" onSubmit={addCitation}><select name="resourceVersionId" required defaultValue=""><option value="" disabled>选择资料版本</option>{resources.flatMap((resource) => (resource.versions || []).map((version) => <option key={version.id} value={version.id}>{resource.name} · v{version.id.slice(0, 8)}</option>))}</select><div><input name="startOffset" type="number" min="0" placeholder="开始 offset" required /><input name="endOffset" type="number" min="1" placeholder="结束 offset" required /></div><button>绑定到当前版本</button></form></section>}
-          <section className="rail-section"><div className="section-heading"><h2>待处理影响</h2><span className={impacts.length ? "count-warning" : ""}>{impacts.length}</span></div>{impacts.length ? impacts.slice(0, 6).map((impact) => <div className="impact-row" key={impact.citationId}><span className={`status-dot ${impact.status}`} /><div><b>{impact.page.title}</b><small>{impact.resource.name} · {statusText[impact.status]}</small></div></div>) : <p className="muted">没有待复核或失效引用。</p>}</section>
-          <section className="rail-section"><div className="section-heading"><h2>原始资料</h2><span>{resources.length}</span></div><form className="search-form" onSubmit={search}><input name="q" maxLength="256" placeholder="搜索原始资料" required /><button>搜索</button></form><form className="upload-form" onSubmit={importResource}><input name="file" type="file" accept=".md,.txt,.pdf" required /><button>导入资料</button></form>{resources.length ? resources.map((resource) => <div className="resource-card" key={resource.id}><div><b>{resource.name}</b><small>{statusText[resource.status] || resource.status} · {resource.currentVersion?.id ? `v${resource.versions.length}` : "未索引"}</small></div><select value={resource.wikiMode || "inherit"} onChange={(event) => setResourceMode(resource, event.target.value)}><option value="inherit">继承 Wiki 策略</option><option value="enabled">参与 Wiki</option><option value="retrieval-only">仅检索</option></select><div className="resource-actions"><label className="resource-action">追加版本<input type="file" accept=".md,.txt,.pdf" onChange={(event) => appendResourceVersion(event, resource)} /></label><button type="button" className="resource-action" disabled={!resource.currentVersion} onClick={() => reprocessResource(resource)}>重处理/刷新 OCR</button><button type="button" className="resource-action" disabled={!resource.currentVersion} onClick={() => retryResource(resource)}>重试</button></div>{resource.wikiMode === "retrieval-only" && <span className="readonly-label">retrieval-only：不参与 Wiki</span>}</div>) : <p className="muted">暂无原始资料。</p>}</section>
-          {searchResults.length > 0 && <section className="rail-section search-results"><div className="section-heading"><h2>搜索结果</h2><span>{searchResults.length}</span></div>{searchResults.map((result) => <article key={result.chunkId || result.id}><b>{result.resource?.name || result.resource?.title || "未知资料"}</b><p>{result.snippet || result.content}</p></article>)}</section>}
-        </>}
-        <section className="rail-section agent-sources">
-          <div className="section-heading"><h2>Tree sources</h2><span>{treeSourceCount}</span></div>
-          {resources.map((resource) => {
-            const versionId = resource.currentVersion?.id;
-            return <label className="source-check" key={resource.id}>
-              <input type="checkbox" checked={Boolean(versionId && selectedResourceVersionIds.includes(versionId))} disabled={!versionId} onChange={() => versionId && toggleResourceVersion(versionId)} />
-              <span><b>{resource.name}</b><small>{versionId ? `current v${resource.versions.length}` : "not indexed"}</small></span>
-            </label>;
-          })}
-          {!resources.length && <p className="muted">Import and index a resource first.</p>}
-        </section>
+      <section className="section-block">
+        <div className="section-lead"><div><h3>需要关注</h3><p>影响项不是自动修复结果，处理前请确认来源版本。</p></div><span className="meta">{impacts.length}</span></div>
+        {impacts.length ? <div className="impact-list">{impacts.slice(0, 6).map((impact) => <div className="impact-row" key={impact.citationId}><span className={"status-dot " + impact.status} /><div><b>{impact.page.title}</b><small>{impact.resource.name} · {statusText[impact.status] || impact.status}</small></div></div>)}</div> : <div className="empty">暂无待复核或失效引用。</div>}
+      </section>
+    </div>
+
+    <div className="overview-columns">
+      <section className="section-block">
+        <div className="section-lead"><div><h3>Wiki 整理候选</h3><p>只有明确进入 Agent 整理范围的资料才会生成提案。</p></div></div>
+        {wiki?.candidates?.length ? wiki.candidates.slice(0, 8).map((item) => <div className="list-row" key={item.id}><span><b>{item.name}</b><small>{item.mimeType || item.mime_type || "原始资料"}</small></span>{statusLabel(item.status)}</div>) : <div className="empty">暂无候选资料。导入并完成索引后会出现在这里。</div>}
+      </section>
+      <section className="section-block">
+        <div className="section-lead"><div><h3>最近活动</h3><p>系统事件用于追溯处理过程。</p></div><button className="btn btn-ghost" type="button" onClick={() => navigate("tasks")}>查看记录</button></div>
+        {(wiki?.log?.events || []).length ? <div className="activity-list">{wiki.log.events.slice(0, 6).map((event) => <div className="list-row" key={event.id}><span><b>{event.event_type}</b><small>{event.entity_type}</small></span><time>{new Date(event.created_at).toLocaleString()}</time></div>)}</div> : <div className="empty">暂无审计事件。</div>}
+      </section>
+    </div>
+  </div>;
+
+  const renderResources = () => <div className="view-stack">
+    <header className="page-head">
+      <div>
+        <span className="eyebrow">LIBRARY / SOURCES</span>
+        <h1>资料库</h1>
+        <p>原始资料和每个资料版本均为只读事实底座；归档、重处理和追加版本不会删除历史。</p>
+      </div>
+      <div className="page-head-actions"><button className="btn btn-secondary" type="button" onClick={() => loadWorkspace(selected?.id)}><Icon name="refresh" size={17} />刷新资料</button></div>
+    </header>
+
+    <div className="toolbar">
+      <form className="toolbar-search" onSubmit={search}>
+        <label className="search-field"><span className="visually-hidden">搜索原始资料</span><input name="q" value={resourceFilter} onChange={(event) => setResourceFilter(event.target.value)} maxLength={256} placeholder="搜索原始资料" required /></label>
+        <select value={resourceStatusFilter} onChange={(event) => setResourceStatusFilter(event.target.value)} aria-label="按资料状态筛选">
+          <option value="all">全部状态</option>
+          {["pending", "processing", "indexed", "degraded", "failed", "archived"].map((status) => <option value={status} key={status}>{statusText[status] || status}</option>)}
+        </select>
+        <button className="btn btn-secondary" type="submit"><Icon name="search" size={17} />搜索</button>
+      </form>
+    </div>
+
+    <section className="upload-panel" aria-labelledby="upload-title">
+      <div className="upload-panel-head">
+        <div>
+          <span className="eyebrow">BATCH IMPORT</span>
+          <h2 id="upload-title">添加原始资料</h2>
+          <p>一次选择多个文件，系统会逐个加入处理队列；原始文件始终保留为只读版本。</p>
+        </div>
+        <div className="upload-summary" aria-live="polite">
+          {uploadQueue.length ? <><strong>{uploadSuccessCount}/{uploadQueue.length}</strong><span>已处理{uploadFailureCount ? ` · ${uploadFailureCount} 项需处理` : ""}</span></> : <span>支持 MD、TXT、PDF</span>}
+        </div>
+      </div>
+      <form className="upload-form" onSubmit={importResource}>
+        <label className={"upload-dropzone" + (uploadDropActive ? " active" : "") + (uploadBusy ? " disabled" : "")} onDragOver={(event) => { event.preventDefault(); if (!uploadBusy) setUploadDropActive(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setUploadDropActive(false); }} onDrop={handleUploadDrop}>
+          <input name="file" type="file" accept=".md,.txt,.pdf" multiple disabled={uploadBusy} onChange={handleUploadInput} aria-label="选择要导入的资料，可多选" />
+          <span className="upload-drop-icon"><Icon name="upload" size={22} /></span>
+          <span><strong>拖拽文件到这里</strong><small>或点击选择，可一次添加多个文件</small></span>
+        </label>
+        <div className="upload-actions">
+          <button className="btn btn-primary" type="submit" disabled={uploadBusy || !actionableUploadCount}><Icon name="upload" size={17} />{uploadBusy ? "上传中…" : actionableUploadCount ? `上传 ${actionableUploadCount} 个文件` : "开始上传"}</button>
+          {uploadQueue.length > 0 && <button className="btn btn-ghost" type="button" onClick={clearUploadQueue} disabled={uploadBusy}>清空列表</button>}
+        </div>
+      </form>
+      {uploadQueue.length > 0 && <div className="upload-queue" aria-live="polite">
+        <div className="upload-queue-head"><strong>文件清单</strong><span>{uploadQueue.length} 个文件</span></div>
+        <ul>
+          {uploadQueue.map((item) => <li className={"upload-item " + item.status} key={item.id}>
+            <span className="upload-file-type">{uploadFileExtension(item.file.name).slice(1).toUpperCase() || "FILE"}</span>
+            <div className="upload-file-info"><strong title={item.file.name}>{item.file.name}</strong><small>{formatFileSize(item.file.size)} · {uploadFileExtension(item.file.name).slice(1).toUpperCase() || "未知类型"}</small>{item.error && <span className="upload-item-error" role="alert">{item.error}</span>}</div>
+            <span className="upload-item-state"><span className="upload-status-dot" aria-hidden="true" />{uploadStatusText[item.status] || item.status}</span>
+            <button className="icon-btn upload-remove" type="button" onClick={() => removeUploadItem(item.id)} disabled={uploadBusy} aria-label={`移除 ${item.file.name}`} title="移除文件"><Icon name="close" size={17} /></button>
+          </li>)}
+        </ul>
+      </div>}
+    </section>
+
+    <section className="table-wrap" aria-label="资料列表">
+      <table className="data-table">
+        <thead><tr><th>资料</th><th>状态 / 版本</th><th className="resource-strategy">Wiki 策略</th><th>操作</th></tr></thead>
+        <tbody>
+          {filteredResources.map((resource) => <tr key={resource.id}>
+            <td data-label="资料"><div className="file-title"><Icon name="file" size={19} /><span><button className="table-link" type="button" onClick={() => openResource(resource)}>{resource.name}</button><span className="table-meta">{resource.mimeType || resource.mime_type || "原始资料"}</span></span></div></td>
+            <td data-label="状态 / 版本"><div>{statusLabel(resource.status)}</div><span className="table-meta">{resource.currentVersion?.id ? "v" + resource.versions.length : "尚未索引"}</span></td>
+            <td data-label="Wiki 策略" className="resource-strategy"><select className="strategy-select" value={resource.wikiMode || "inherit"} onChange={(event) => setResourceMode(resource, event.target.value)} aria-label={resource.name + " 的 Wiki 策略"}><option value="inherit">继承知识库</option><option value="enabled">参与 Wiki</option><option value="retrieval-only">仅检索</option></select></td>
+            <td data-label="操作"><div className="resource-actions"><button className="btn btn-secondary" type="button" onClick={() => openResource(resource)}>详情</button><label className="btn btn-secondary">追加版本<input type="file" accept=".md,.txt,.pdf" onChange={(event) => appendResourceVersion(event, resource)} /></label><button className="btn btn-secondary" type="button" disabled={!resource.currentVersion} onClick={() => reprocessResource(resource)}>重处理</button><button className="btn btn-secondary" type="button" disabled={!resource.currentVersion} onClick={() => retryResource(resource)}>重试</button></div></td>
+          </tr>)}
+        </tbody>
+      </table>
+      {!filteredResources.length && <div className="empty">没有匹配的资料。可以调整筛选条件或导入一份新的原始材料。</div>}
+    </section>
+
+    {searchResults.length > 0 && <section className="section-block search-results"><div className="section-lead"><div><h2>搜索结果</h2><p>结果来自当前知识库的原始资料。</p></div><span className="meta">{searchResults.length}</span></div>{searchResults.map((result) => <article key={result.chunkId || result.id}><b>{result.resource?.name || result.resource?.title || "未知资料"}</b><p>{result.snippet || result.content}</p></article>)}</section>}
+  </div>;
+
+  const renderWiki = () => <section className="wiki-layout">
+    <aside className="wiki-directory" aria-label="Wiki 目录">
+      <button className="directory-toggle" type="button" aria-expanded={wikiDirectoryOpen} onClick={() => setWikiDirectoryOpen((open) => !open)}>
+        <h2>Wiki 目录</h2><span className="meta">{ordinaryPages.length}<Icon name="chevron-down" size={17} /></span>
+      </button>
+      {wikiDirectoryOpen && <div className="wiki-directory-body">
+        {ordinaryPages.length ? renderWikiTree(wiki?.pages) : <p className="tree-empty">还没有 Wiki 页面，先创建一篇页面。</p>}
+        <form className="create-page" onSubmit={createPage}>
+          <h3>新建页面</h3>
+          <input name="title" placeholder="页面标题" required />
+          <input name="slug" placeholder="slug（可选）" pattern="[a-z0-9](?:[a-z0-9-]{0,158}[a-z0-9])?" />
+          <select name="pageType" defaultValue="concept">{pageTypes.map((type) => <option key={type}>{type}</option>)}</select>
+          <select name="spaceId" defaultValue=""><option value="">不指定空间</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select>
+          <select name="parentPageId" defaultValue=""><option value="">顶层页面</option>{ordinaryPages.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select>
+          <button className="btn btn-primary" type="submit"><Icon name="plus" size={17} />新建 Wiki 页面</button>
+        </form>
+      </div>}
+    </aside>
+
+    <div className="wiki-reading">
+      {!page && <div className="empty"><h2>选择一篇 Wiki 页面</h2><p>从左侧目录选择页面。主题树是页面父子关系，不是当前正文的大纲。</p></div>}
+      {page && <article>
+        <header className="article-heading">
+          <span className="article-kicker">{page.pageType} / {page.slug}</span>
+          <div className="article-heading-row">
+            <h1>{page.title}</h1>
+            <div className="article-actions">
+              <button className="btn btn-secondary" type="button" onClick={() => switchWikiTab("edit")}><Icon name="edit" size={17} />编辑</button>
+              <button className="btn btn-secondary" type="button" onClick={() => switchWikiTab("history")}><Icon name="history" size={17} />历史</button>
+            </div>
+          </div>
+          <dl className="page-facts">
+            <div><dt>空间</dt><dd>{spaceName(page.spaceId)}</dd></div>
+            <div><dt>版本</dt><dd>v{versions.length}</dd></div>
+            <div><dt>引用</dt><dd>{currentCitationCount}</dd></div>
+            <div><dt>ID</dt><dd>{page.id}</dd></div>
+          </dl>
+        </header>
+
+        <div className="tabs" role="tablist" aria-label="Wiki 页面内容">
+          <button className={"tab " + (wikiTab === "read" ? "selected" : "")} type="button" role="tab" aria-selected={wikiTab === "read"} onClick={() => switchWikiTab("read")}>阅读</button>
+          <button className={"tab " + (wikiTab === "edit" ? "selected" : "")} type="button" role="tab" aria-selected={wikiTab === "edit"} onClick={() => switchWikiTab("edit")}>编辑</button>
+          <button className={"tab " + (wikiTab === "history" ? "selected" : "")} type="button" role="tab" aria-selected={wikiTab === "history"} onClick={() => switchWikiTab("history")}>版本历史</button>
+        </div>
+
+        {wikiTab === "read" && <div className="article">
+          <div className="article-text">{markdownPreview(page.currentVersion?.contentMarkdown || "")}</div>
+          <div className="article-note"><Icon name="quote" size={18} /><span>引用状态和资料版本保持独立。手动改写内容后，需要重新建立或验证对应引用关系。</span></div>
+          <section className="article-bottom">
+            <div className="section-lead"><div><h2>引用与原始资料</h2><p>点击引用打开只读原文定位，资料更新不会把旧版本替换成最新版本。</p></div><span className="meta">{currentCitationCount}</span></div>
+            {page.currentVersion?.citations?.length ? page.currentVersion.citations.map((citation) => <button className="citation-row" type="button" key={citation.id} onClick={() => openCitation(citation)}><Icon name="quote" size={18} /><div><b>{citation.source?.resourceName || "来源不可用"}</b><small>版本 {citation.resourceVersionId.slice(0, 8)} · locator {JSON.stringify(citation.locator)}</small></div>{statusLabel(citation.status)}</button>) : <div className="empty">当前页面还没有绑定引用。</div>}
+          </section>
+        </div>}
+
+        {wikiTab === "edit" && <div className="edit-mode">
+          <div className="edit-layout">
+            <section className="editor-panel"><h3>Markdown 编辑</h3><textarea className="markdown-editor" value={contentDraft} onChange={(event) => setContentDraft(event.target.value)} spellCheck={false} aria-label="Wiki Markdown 内容" /><div className="editor-foot"><span>保存会创建新的不可变版本</span><span className="num">{contentDraft.length.toLocaleString()} 字符</span></div></section>
+            <section className="preview-panel"><h3>预览</h3><div className="preview-content"><div className="markdown-preview">{markdownPreview(contentDraft)}</div></div></section>
+          </div>
+          <div className="metadata-form">
+            <label>页面标题<input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} onBlur={saveMetadata} /></label>
+            <label>slug<input value={slugDraft} onChange={(event) => setSlugDraft(event.target.value)} onBlur={saveMetadata} /></label>
+            <label>空间<select value={spaceDraft} onChange={(event) => setSpaceDraft(event.target.value)} onBlur={saveMetadata}><option value="">不指定空间</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select></label>
+            <label>父页面<select value={parentDraft} onChange={(event) => setParentDraft(event.target.value)} onBlur={saveMetadata}><option value="">顶层页面</option>{ordinaryPages.filter((item) => item.id !== page.id).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
+          </div>
+          <div className="edit-actions"><span className="muted">页面 ID：{page.id}</span><button className="btn btn-primary" type="button" onClick={savePage}><Icon name="check" size={17} />保存为新版本</button></div>
+        </div>}
+
+        {wikiTab === "history" && <section className="history-mode">
+          <div className="section-lead"><div><h2>版本历史</h2><p>恢复会创建新版本，旧版本链和审计记录都会保留。</p></div><span className="meta">{versions.length} versions</span></div>
+          <div className="history-list">{versions.length ? versions.map((version, index) => <div className={"version-row " + (version.id === page.currentVersionId ? "current" : "")} key={version.id}><div><b>{version.id === page.currentVersionId ? "当前版本" : "版本 " + (versions.length - index)}</b><small>{new Date(version.created_at || version.createdAt).toLocaleString()} · {version.change_summary || version.changeSummary || "无说明"}</small></div><div className="version-actions"><button className="btn btn-secondary" type="button" disabled={version.id === page.currentVersionId} onClick={() => showDiff(version.id)}>查看 diff</button>{version.id !== page.currentVersionId && <button className="btn btn-secondary" type="button" onClick={() => window.confirm("恢复会创建一个新的版本，原历史不会删除。继续吗？") && restore(version.id)}>恢复为新版本</button>}</div></div>) : <div className="empty">暂无版本历史。</div>}</div>
+          {diff && <div className="diff-box"><div className="diff-header"><b>diff：{compareVersionId.slice(0, 8)} → 当前</b><button className="icon-btn" type="button" onClick={() => setDiff(null)} aria-label="关闭 diff" title="关闭 diff"><Icon name="close" size={17} /></button></div><pre>{(diff.lines || []).map((line, index) => <span className={line.type} key={index}>{line.type === "added" ? "+ " : line.type === "removed" ? "- " : "  "}{line.value}{"\n"}</span>)}</pre></div>}
+        </section>}
+      </article>}
+    </div>
+  </section>;
+
+  const renderScope = () => <section className="agent-scope">
+    <div>
+      <h3>本次整理范围</h3>
+      <p className="muted">仅勾选的当前资料版本和 Wiki 页面会进入 Agent 快照；调整范围不会修改旧回答或旧运行。</p>
+      <div className="scope-list">
+        {resources.map((resource) => {
+          const versionId = resource.currentVersion?.id;
+          return <label key={resource.id}><input type="checkbox" checked={Boolean(versionId && selectedResourceVersionIds.includes(versionId))} disabled={!versionId} onChange={() => versionId && toggleResourceVersion(versionId)} /><span><b>{resource.name}</b><small>{versionId ? "当前版本 v" + resource.versions.length : "尚未索引"}</small></span></label>;
+        })}
+        {ordinaryPages.map((item) => <label key={item.id}><input type="checkbox" checked={selectedWikiPageIds.includes(item.id)} onChange={() => toggleWikiPage(item.id)} /><span><b>{item.title}</b><small>Wiki 页面 · {item.pageType}</small></span></label>)}
+        {!resources.length && !ordinaryPages.length && <div className="empty">先导入资料或创建 Wiki 页面。</div>}
+      </div>
+    </div>
+    <div className="scope-controls">
+      <div className="section-lead"><div><h3>范围摘要</h3><p>{treeSourceCount} 个来源已选择</p></div><span className="num">{treeSourceCount}</span></div>
+      <button className="btn btn-secondary" type="button" onClick={selectAllCurrentResources} disabled={!resources.some((resource) => resource.currentVersion?.id)}>选择全部当前资料</button>
+      <label>新建树挂载到<select value={mountPageId} onChange={(event) => setMountPageId(event.target.value)}><option value="">顶层</option>{ordinaryPages.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>
+      <p>资料版本、Wiki 页面和挂载位置会写入本次 Agent run 的范围快照。生成的根节点不会使用系统 index / log 页面。</p>
+    </div>
+  </section>;
+
+  const renderChat = () => <section className="agent-panel" data-testid="agent-chat">
+    <div className="agent-panel-header">
+      <div><span className="eyebrow">PI AGENT / READ ONLY</span><h2>Agent 问答</h2><p>当前范围：{page?.title ? "Wiki 页面「" + page.title + "」" : "开放对话（未附带知识库证据）"}</p></div>
+      <div className="agent-header-actions"><span className="meta">{agentRun ? "run " + agentRun.status : "尚无运行"}</span>{agentRun && <button className="btn btn-ghost" type="button" onClick={openAgentTrace}>查看运行 trace</button>}<button className="btn btn-secondary" type="button" onClick={chatSession ? () => refreshChatSession() : createChatSession}>{chatSession ? "刷新聊天" : "开始聊天"}</button></div>
+    </div>
+    <div className="chat-window" aria-live="polite">
+      {chatMessages.length ? chatMessages.map((item) => <article className={"chat-message " + item.role + " " + item.status} key={item.id}>
+        <div className="chat-message-meta"><b>{item.role === "user" ? "你" : "Pi Agent"}</b><span>{item.status}</span></div>
+        <p>{item.content || (["pending", "running", "retrying"].includes(item.status) ? "正在读取范围并整理回答…" : "暂无回答")}</p>
+        {item.answer && <div className="answer-meta"><span>evidence: {item.answer.evidenceStatus || "none"}</span><span>{item.answer.evidence?.length || 0} citation(s)</span></div>}
+        {item.error && <div className="trace-warning">{item.error.code}: {item.error.message}</div>}
+      </article>) : <div className="empty"><b>还没有消息</b><p>可以先问一个开放问题，也可以在打开 Wiki 页面后询问当前范围。</p></div>}
+    </div>
+    <form className="chat-form" onSubmit={sendChat}><textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} maxLength={4000} rows={2} placeholder="向 Agent 提问；回答会区分 MyKnow 证据和模型补充…" aria-label="Agent 问题" /><button className="btn btn-primary" type="submit" disabled={chatBusy || !chatInput.trim()}>{chatBusy ? "发送中…" : "发送"}</button></form>
+  </section>;
+
+  const renderRetrieval = () => {
+    const wikiSeeds = retrieval?.wiki?.seeds || [];
+    const rawResults = retrieval?.raw?.results || [];
+    const graphExpanded = retrieval?.wiki?.graphExpanded || [];
+    return <div className="retrieval-layout">
+      <header className="page-head">
+        <div><span className="eyebrow">RETRIEVAL / ANSWERS</span><h1>检索问答</h1><p>先明确范围，再查看 Wiki 命中、原始资料定位和上下文预算；证据不足时保留未知。</p></div>
+        {retrieval && <button className="btn btn-secondary" type="button" onClick={openRetrievalTrace}><Icon name="activity" size={17} />查看运行 trace</button>}
+      </header>
+      <section className="section-block">
+        <div className="section-lead"><div><h2>运行一次检索</h2><p>本次运行会保存知识库、空间、Top-K 和上下文预算快照。</p></div><span className="meta">{retrieval ? "trace " + retrieval.traceId.slice(0, 8) : "尚未运行"}</span></div>
+        <form className="retrieval-form" onSubmit={runRetrieval}>
+          <input name="query" required maxLength={256} placeholder="输入要查找的问题或关键词" />
+          <select name="spaceId" defaultValue=""><option value="">全部空间</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select>
+          <input name="wikiTopK" type="number" min="1" max="20" defaultValue="5" aria-label="Wiki Top K" />
+          <input name="rawTopK" type="number" min="1" max="20" defaultValue="10" aria-label="原始资料 Top K" />
+          <input name="contextBudgetTokens" type="number" min="1" max="50000" defaultValue="8000" aria-label="上下文预算" />
+          <button className="btn btn-primary" type="submit" disabled={retrievalBusy}>{retrievalBusy ? "检索中…" : "开始检索"}</button>
+        </form>
+        <div className="scope-chips"><span className="tag">知识库：{selected.name}</span><span className="tag">Wiki / 原始资料独立排序</span><span className="tag">原始资料：当前知识库</span></div>
+      </section>
+      {retrieval && <div className="retrieval-results">
+        <section className="result-group"><h3>Wiki 命中 <span>{wikiSeeds.length}</span></h3>{wikiSeeds.length ? wikiSeeds.map((item) => <button className="retrieval-result" type="button" key={item.pageId} onClick={() => selectWikiPage(item.pageId)}><span><b>{item.rank}. {item.title}</b><small>{item.page?.pageType} · score {item.normalizedScore.toFixed(2)} · {item.seedGate?.passed ? "允许图扩展" : "未通过 seed 门槛"}</small></span><code>{item.pageVersionId.slice(0, 8)}</code></button>) : <div className="empty">没有 Wiki 页面命中。</div>}</section>
+        <section className="result-group"><h3>原始资料片段 <span>{rawResults.length}</span></h3>{rawResults.length ? rawResults.map((item) => <a className="retrieval-result" key={item.chunkId} href={retrievalLocatorPath(item)} target="_blank" rel="noreferrer"><span><b>{item.rank}. {item.resource?.name}</b><small>{item.content.slice(0, 180)}{item.content.length > 180 ? "…" : ""}</small></span><code>{item.locator?.startOffset ?? "-"}:{item.locator?.endOffset ?? "-"}</code></a>) : <div className="empty">没有原始资料片段命中。</div>}</section>
+        <section className="result-group"><h3>关系扩展 <span>{graphExpanded.length}</span></h3>{graphExpanded.length ? graphExpanded.map((item) => <button className="retrieval-result" type="button" key={item.pageId + "-" + item.rank} onClick={() => selectWikiPage(item.pageId)}><span><b>{item.hop}-hop · {item.title}</b><small>{item.path?.map((edge) => edge.direction + " " + edge.linkText).join(" → ")} · decay {item.decay}</small></span><code>{item.pageId.slice(0, 8)}</code></button>) : <div className="empty">只有高置信度 Wiki 命中才会扩展关系。</div>}<div className="context-summary"><b>上下文快照</b><span>{retrieval.context.estimatedTokens}/{retrieval.limits.contextBudgetTokens} tokens · {retrieval.context.truncated ? "已截断" : "在预算内"}</span><small>Wiki {retrieval.context.wikiEstimatedTokens}/{retrieval.context.wikiBudgetTokens} · 原始资料 {retrieval.context.rawEstimatedTokens}/{retrieval.context.rawBudgetTokens}</small></div></section>
+      </div>}
+      {renderChat()}
+    </div>;
+  };
+
+  const renderReview = () => <div className="view-stack">
+    <header className="page-head">
+      <div><span className="eyebrow">REVIEW / CHANGE PLAN</span><h1>待审核</h1><p>Agent 只提交整理计划；审核、证据和真正写入是分开的状态维度。</p></div>
+      <div className="page-head-actions"><button className="btn btn-primary" type="button" disabled={!treeSourceCount || agentBusy} onClick={startOrganizePlan}>{agentBusy ? "生成中…" : "生成整理计划"}</button>{agentRun && <button className="btn btn-secondary" type="button" onClick={openAgentTrace}>运行 trace</button>}</div>
+    </header>
+    {renderScope()}
+    {!agentRun && <div className="empty"><h2>尚未生成计划</h2><p>先勾选明确的资料版本或 Wiki 页面，Agent 只能通过审阅计划申请写入。</p></div>}
+    {agentRun && !agentPlan.length && <div className="empty"><h2>计划正在生成</h2><p>run {agentRun.id.slice(0, 8)} · {agentRun.status}</p></div>}
+    {agentPlan.length > 0 && <div className="plan-summary"><b>Plan status: {agentPlanStatus}</b><span>{agentPlan.filter((item) => item.applicationStatus === "applied").length}/{agentPlan.length} applied · citation policy: {agentRun?.citationPolicy || "required"} · {agentPlan.reduce((count, item) => count + (item.validationWarnings?.length || 0), 0)} warning(s)</span></div>}
+    {agentPlan.map((item) => {
+      const isTreeNode = Boolean(item.nodeId);
+      const isRoot = isTreeNode && !item.parentNodeId;
+      const isEditing = editingPlanItemId === item.id;
+      return <article className="plan-item" key={item.id}>
+        <div className="plan-item-header"><div><b>{item.nodeRole || item.itemType}</b><small>{isTreeNode ? "node " + item.nodeId + " · parent " + (item.parentNodeId || "top-level") : "target " + (item.targetPageId?.slice(0, 8) || "new page")} · risk {item.risk}</small></div>{statusLabel(item.applicationStatus)}</div>
+        {isEditing ? <div className="plan-edit-form"><input value={planEditDraft?.title || ""} onChange={(event) => setPlanEditDraft((current) => ({ ...current, title: event.target.value }))} maxLength={200} aria-label="提案标题" /><select value={planEditDraft?.pageType || "concept"} onChange={(event) => setPlanEditDraft((current) => ({ ...current, pageType: event.target.value }))} aria-label="提案页面类型">{pageTypes.map((type) => <option key={type}>{type}</option>)}</select><textarea value={planEditDraft?.contentMarkdown || ""} onChange={(event) => setPlanEditDraft((current) => ({ ...current, contentMarkdown: event.target.value }))} maxLength={120000} rows={6} aria-label="提案内容" /><div className="plan-actions"><button className="btn btn-primary" type="button" onClick={() => savePlanEdit(item)}>保存编辑</button><button className="btn btn-secondary" type="button" onClick={() => { setEditingPlanItemId(null); setPlanEditDraft(null); }}>取消</button></div></div> : <><h3>{item.proposed?.title || "未命名提案"}</h3>{item.proposed?.contentMarkdown && <pre className="plan-content">{item.proposed.contentMarkdown.slice(0, 1600)}</pre>}</>}
+        {item.diff?.lines?.length > 0 && <pre className="plan-diff">{item.diff.lines.slice(0, 80).map((line) => (line.type === "added" ? "+" : line.type === "removed" ? "-" : " ") + " " + line.value).join("\n")}</pre>}
+        <div className="plan-evidence"><span>证据：{item.evidenceStatus}</span><span>{item.citations?.length || 0} citation(s)</span><span>审核：{item.reviewStatus}</span></div>
+        {item.validationWarnings?.length > 0 && <div className="trace-warning">{item.validationWarnings.map((warning, index) => <div key={warning.code + "-" + (warning.citationIndex ?? "missing") + "-" + index}>{warning.code}: {warning.message}</div>)}</div>}
+        {item.error && <div className="trace-warning">{item.error.code}: {item.error.message}</div>}
+        <div className="plan-actions">
+          {item.reviewStatus === "proposed" && item.applicationStatus === "pending" && <>{item.evidenceStatus === "needs_evidence" ? <span className="plan-blocked">需要补充证据后才能应用</span> : isTreeNode && isRoot ? <button className="btn btn-primary" type="button" onClick={() => decidePlanBranch(item, "approve")}>审阅并应用整棵分支</button> : <button className="btn btn-primary" type="button" onClick={() => decidePlanItem(item, "approve")}>审阅并应用</button>}<button className="btn btn-secondary" type="button" onClick={() => decidePlanBranch(item, "reject")}>拒绝{isTreeNode ? "分支" : ""}</button>{!isEditing && <button className="btn btn-secondary" type="button" onClick={() => beginPlanEdit(item)}>编辑</button>}</>}
+          {item.applicationStatus === "applied" && <button className="btn btn-secondary" type="button" onClick={() => rollbackPlanItem(item)}>恢复为新版本</button>}
+        </div>
+      </article>;
+    })}
+  </div>;
+
+  const renderTasks = () => <div className="view-stack">
+    <header className="page-head"><div><span className="eyebrow">OPERATIONS / HISTORY</span><h1>任务与记录</h1><p>处理进度、失败原因和审计事件逐步展开，原始资料和历史版本不会因为派生任务失败而丢失。</p></div><button className="btn btn-secondary" type="button" onClick={() => loadWorkspace(selected?.id)}><Icon name="refresh" size={17} />刷新状态</button></header>
+    <section className="section-block"><div className="section-lead"><div><h2>处理任务</h2><p>真实任务状态来自服务端，失败时可回到资料库重试。</p></div><span className="meta">{tasks.length}</span></div><div className="task-list">{tasks.length ? tasks.map((task) => <div className="task-row" key={task.id}><div><b>{task.type}</b><small>{statusText[task.status] || task.status}{task.errorSummary ? " · " + task.errorSummary : ""}</small></div><div className="task-progress"><div className="progress-track"><span style={{ width: Math.max(0, Math.min(100, task.progress ?? 0)) + "%" }} /></div><span>{task.progress ?? 0}%</span></div></div>) : <div className="empty">暂无处理任务。</div>}</div></section>
+    <section className="section-block"><div className="section-lead"><div><h2>审计记录</h2><p>页面、版本、引用和影响扫描都保留可追溯记录。</p></div><span className="meta">{(wiki?.log?.events || []).length}</span></div><div className="log-table">{(wiki?.log?.events || []).map((event) => <div className="log-row" key={event.id}><time>{new Date(event.created_at).toLocaleString()}</time><b>{event.event_type}</b><span>{event.entity_type} / {event.entity_id.slice(0, 8)}</span><small>{JSON.stringify(event.metadata || {})}</small></div>)}{!wiki?.log?.events?.length && <div className="empty">暂无审计事件。</div>}</div></section>
+  </div>;
+
+  const currentNav = navItems.find((item) => item.id === (view === "log" ? "tasks" : view)) || navItems[0];
+  const currentViewLabel = currentNav.label;
+
+  return <div className="knowledge-shell">
+    <aside className={"global-sidebar " + (mobileNavOpen ? "visible" : "")} aria-label="全局导航">
+      <div className="sidebar-top">
+        <div className="brand"><Icon name="book" size={27} />MyKnow</div>
+        <div className="library-switch">
+          <span><span className="label-text">当前知识库</span>{bases.length ? <select value={selected?.id || ""} onChange={(event) => { const next = bases.find((base) => base.id === event.target.value); if (next) selectBase(next); }} aria-label="选择当前知识库">{bases.map((base) => <option key={base.id} value={base.id}>{base.name}</option>)}</select> : <strong>暂无知识库</strong>}</span>
+          <Icon name="chevron-down" size={17} />
+        </div>
+        <form className="library-create" onSubmit={createBase}><input name="name" placeholder="新知识库名称" required /><button className="btn btn-primary" type="submit" aria-label="创建知识库" title="创建知识库"><Icon name="plus" size={17} /></button></form>
+        <nav aria-label="工作区模块">
+          <p className="nav-label">工作区</p>
+          <div className="nav-list">{navItems.map((item) => {
+            const count = item.id === "resources" ? resources.length : item.id === "wiki" ? ordinaryPages.length : item.id === "review" ? reviewCount : item.id === "tasks" ? tasks.length : null;
+            return <button className={"nav-link " + (view === item.id ? "active" : "")} type="button" key={item.id} aria-current={view === item.id ? "page" : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{count !== null && <span className="count">{count}</span>}</button>;
+          })}</div>
+        </nav>
+      </div>
+      <div className="sidebar-foot">
+        <div className="row"><Icon name="hard-drive" size={16} /><span>本地工作区</span></div>
+        <p>{runtime ? (runtime.aiEgressMode === "local_only" ? "AI 仅允许本地 Provider" : "AI 可使用云端 Provider") : "运行策略加载中"}</p>
+        <button className="policy-button" type="button" onClick={openSettings}>AI 策略与运行状态</button>
+      </div>
+    </aside>
+    {mobileNavOpen && <button className="sidebar-backdrop" type="button" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
+
+    <div className="workspace-column">
+      <header className="topnav" data-testid="personal-runtime">
+        <div className="crumb"><button className="icon-btn mobile-menu" type="button" aria-label="切换导航" title="切换导航" onClick={() => setMobileNavOpen((open) => !open)}><Icon name="menu" size={19} /></button><span className="muted">{selected?.name || "MyKnow"}</span><span className="muted">/</span><strong>{currentViewLabel}</strong></div>
+        <div className="top-actions"><span className="runtime-status" data-testid="runtime-status">{runtime ? (runtime.aiEgressMode === "local_only" ? "仅本地 AI" : "允许云端 AI") + " · " + runtime.model.provider : "运行状态加载中"}</span><button className="icon-btn" type="button" title="检索知识库" aria-label="检索知识库" onClick={() => navigate("retrieval")}><Icon name="search" size={19} /></button><button className="icon-btn" type="button" title="知识库设置" aria-label="知识库设置" onClick={openSettings}><Icon name="settings" size={19} /></button></div>
+      </header>
+
+      <main className="main-content">
+        <Notice error={error} message={message} onDismiss={() => { setError(""); setMessage(""); }} />
+        {!selected && <div className="empty"><h1>选择或创建一个知识库</h1><p>知识库是检索和 Wiki 的边界；先创建或选择一个知识库，再开始导入资料。</p><form className="library-create" onSubmit={createBase}><input name="name" placeholder="新知识库名称" required /><button className="btn btn-primary" type="submit"><Icon name="plus" size={17} />创建知识库</button></form></div>}
+        {selected && loading && <div className="loading-line" role="status">正在加载当前知识库…</div>}
+        {selected && view === "overview" && renderOverview()}
+        {selected && view === "resources" && renderResources()}
+        {selected && view === "wiki" && renderWiki()}
+        {selected && view === "retrieval" && renderRetrieval()}
+        {selected && view === "review" && renderReview()}
+        {selected && (view === "tasks" || view === "log") && renderTasks()}
+      </main>
+    </div>
+
+    {drawer && <div className="drawer-overlay open" role="presentation" onClick={closeDrawer}>
+      <aside className="context-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" onClick={(event) => event.stopPropagation()}>
+        <div className="drawer-head"><div><span className="eyebrow">CONTEXT / DETAIL</span><h2 id="drawer-title">{drawer.kind === "citation" ? "引用追溯" : drawer.kind === "resource" ? "资料详情" : drawer.kind === "retrieval" ? "检索运行" : drawer.kind === "agent" ? "Agent 运行" : "知识库设置"}</h2></div><button className="icon-btn" type="button" data-drawer-close="true" aria-label="关闭详情" title="关闭详情" onClick={closeDrawer}><Icon name="close" size={19} /></button></div>
+
+        {drawer.kind === "citation" && <div>
+          <section className="drawer-section"><h3>{drawer.citation.source?.resourceName || "来源不可用"}</h3><dl className="drawer-facts"><div><dt>引用状态</dt><dd>{statusLabel(drawer.citation.status)}</dd></div><div><dt>资料版本</dt><dd>{drawer.citation.resourceVersionId}</dd></div><div><dt>原文位置</dt><dd>{JSON.stringify(drawer.citation.locator)}</dd></div></dl></section>
+          <section className="drawer-section"><h3>只读上下文</h3>{drawer.citation.source?.previewPath ? sourcePreview?.citationId === drawer.citation.id ? <div className="source-preview">{sourcePreview.snippet || "该文件类型暂无文本预览。"}</div> : <p className="muted">正在读取引用位置…</p> : <p className="muted">该引用没有可用的原文预览入口。</p>}</section>
+          {drawer.citation.source?.downloadPath && <section className="drawer-section"><a className="btn btn-secondary" href={apiBase() + drawer.citation.source.downloadPath} target="_blank" rel="noreferrer">打开只读原文 <Icon name="external" size={16} /></a></section>}
+        </div>}
+
+        {drawer.kind === "resource" && <div>
+          <section className="drawer-section"><h3>{drawer.resource.name}</h3><dl className="drawer-facts"><div><dt>当前状态</dt><dd>{statusLabel(drawer.resource.status)}</dd></div><div><dt>Wiki 策略</dt><dd>{drawer.resource.wikiMode || "继承知识库"}</dd></div><div><dt>资料类型</dt><dd>{drawer.resource.mimeType || drawer.resource.mime_type || "原始资料"}</dd></div></dl></section>
+          <section className="drawer-section"><h3>不可变版本</h3><div className="drawer-list">{(drawer.resource.versions || []).map((version, index) => <div key={version.id}><b>v{(drawer.resource.versions || []).length - index}</b><small>{version.id}<br />{version.created_at || version.createdAt || "时间未知"}</small></div>)}</div></section>
+          <section className="drawer-section"><p className="settings-note">原始文件保持只读。追加版本会重新进入处理队列，旧版本仍可用于引用追溯。</p><div className="inline-actions"><button className="btn btn-secondary" type="button" disabled={!drawer.resource.currentVersion} onClick={() => { reprocessResource(drawer.resource); closeDrawer(); }}>重处理</button><button className="btn btn-secondary" type="button" disabled={!drawer.resource.currentVersion} onClick={() => { retryResource(drawer.resource); closeDrawer(); }}>重试</button></div></section>
+        </div>}
+
+        {drawer.kind === "retrieval" && drawer.retrieval && <div>
+          <section className="drawer-section"><dl className="drawer-facts"><div><dt>Trace</dt><dd>{drawer.retrieval.traceId}</dd></div><div><dt>范围</dt><dd>{drawer.retrieval.scope.knowledgeBaseId} · raw = whole KB</dd></div><div><dt>向量状态</dt><dd>{drawer.retrieval.vector.status}</dd></div><div><dt>模型</dt><dd>{drawer.retrieval.vector.provider} / {drawer.retrieval.vector.model}</dd></div><div><dt>耗时</dt><dd>{drawer.retrieval.metrics.durationMs}ms</dd></div></dl></section>
+          {drawer.retrieval.vector.error && <section className="drawer-section"><div className="trace-warning">关键词降级：{drawer.retrieval.vector.error.code}</div></section>}
+          <section className="drawer-section"><h3>上下文</h3><p className="settings-note">{drawer.retrieval.context.estimatedTokens}/{drawer.retrieval.limits.contextBudgetTokens} tokens · {drawer.retrieval.context.truncated ? "已截断" : "在预算内"}</p></section>
+        </div>}
+
+        {drawer.kind === "agent" && drawer.agentRun && <div>
+          <section className="drawer-section"><dl className="drawer-facts"><div><dt>Provider</dt><dd>{drawer.agentRun.provider} / {drawer.agentRun.model}</dd></div><div><dt>状态</dt><dd>{drawer.agentRun.status}</dd></div><div><dt>范围</dt><dd>{drawer.agentRun.scope?.knowledgeBaseId ? drawer.agentRun.scope.knowledgeBaseId + " · snapshot" : "open chat"}</dd></div><div><dt>引用策略</dt><dd>{drawer.agentRun.citationPolicy || "required"}</dd></div><div><dt>事件</dt><dd>{drawer.agentEvents?.length || 0}</dd></div></dl></section>
+          {drawer.agentRun.error && <section className="drawer-section"><div className="trace-warning">{drawer.agentRun.error.code}: {drawer.agentRun.error.message}</div></section>}
+          <section className="drawer-section"><h3>最近事件</h3><div className="event-list">{(drawer.agentEvents || []).slice(-8).map((event) => <div className="event-row" key={event.id}><b>{event.eventType}</b><span>{event.toolName || event.stage || "agent"}</span></div>)}</div></section>
+        </div>}
+
+        {drawer.kind === "settings" && <div>
+          <section className="drawer-section"><h3>{selected?.name || "当前知识库"}</h3><dl className="drawer-facts"><div><dt>Wiki 默认策略</dt><dd>{selected?.wikiDefaultMode === "retrieval-only" ? "仅检索" : "Wiki 可参与整理"}</dd></div><div><dt>AI 出站策略</dt><dd>{runtime?.aiEgressMode === "local_only" ? "仅本地 Provider" : "允许云端 Provider"}</dd></div><div><dt>模型</dt><dd>{runtime ? runtime.model.provider + " / " + runtime.model.model : "加载中"}</dd></div><div><dt>向量模型</dt><dd>{runtime ? runtime.embedding.provider + " / " + runtime.embedding.model : "加载中"}</dd></div></dl></section>
+          <section className="drawer-section"><p className="settings-note">密钥和内部配置只保留在服务端；这里仅展示帮助用户理解当前运行边界的状态。</p></section>
+        </div>}
       </aside>
-    </main>
-    <style jsx>{`
-      :global(*){box-sizing:border-box}:global(body){margin:0;background:#eef1f5;color:#1d2939;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}:global(button),:global(input),:global(select),:global(textarea){font:inherit}:global(button){cursor:pointer}.app-shell{min-height:100vh}.topbar{height:76px;display:flex;align-items:center;gap:24px;padding:14px 24px;background:#14202d;color:#fff}.topbar h1{margin:2px 0 0;font-size:19px;font-weight:650;letter-spacing:-.02em}.eyebrow{display:block;color:#8fa4b9;font-size:10px;font-weight:750;letter-spacing:.14em}.topbar-state{margin-left:auto;color:#b8c7d6;font-size:13px}.ghost-button,.primary-button,.inline-form button,.create-page button,.upload-form button,.search-form button{border:1px solid #91a5b8;background:transparent;color:inherit;border-radius:7px;padding:8px 12px}.primary-button{background:#2f6fed;border-color:#2f6fed;color:#fff;font-weight:650}.notice{position:fixed;z-index:5;right:18px;top:88px;max-width:420px;padding:12px 14px;background:#e9f7ef;border:1px solid #9bd3ad;color:#1e6a3a;border-radius:8px;box-shadow:0 8px 24px #17202a18;font-size:13px}.notice.error{background:#fff0f0;border-color:#e2a5a5;color:#9b2b2b}.workspace{display:grid;grid-template-columns:260px minmax(0,1fr) 340px;min-height:calc(100vh - 76px);max-width:1680px;margin:0 auto}.rail{background:#f8fafc;border-right:1px solid #d8e0e8}.right-rail{border-left:1px solid #d8e0e8;border-right:0}.rail-section{padding:18px 16px;border-bottom:1px solid #dfe6ed}.section-heading,.card-title-row,.diff-header,.stat-row,.page-actions,.editor-foot,.citation-status{display:flex;align-items:center;justify-content:space-between;gap:8px}.section-heading h2,.card-title-row h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#526579}.section-heading>span,.card-title-row>span{font-size:11px;color:#8a9bad}.inline-form{display:flex;gap:5px;margin:14px 0 12px}.inline-form input,.create-page input,.search-form input{min-width:0;width:100%;border:1px solid #cbd6e1;background:#fff;border-radius:6px;padding:8px 9px;outline:none}.inline-form button,.create-page button,.upload-form button,.search-form button{background:#fff;border-color:#c5d1de;color:#34495e;padding:7px 9px;white-space:nowrap}.base-list{display:grid;gap:4px}.base-item,.tree-item{display:flex;align-items:center;gap:8px;width:100%;border:0;border-radius:6px;background:transparent;color:#405268;text-align:left;padding:9px 8px;font-size:13px}.base-item:hover,.tree-item:hover,.base-item.selected,.tree-item.selected{background:#e4ebf3;color:#172b42}.base-item small{margin-left:auto;color:#8a9bad;font-size:10px}.base-dot{width:7px;height:7px;border-radius:50%;background:#7695b6}.tree-section{min-height:360px}.tree-item{font-size:12px}.tree-item.system{font-weight:650;margin-top:14px}.tree-item .page-type{width:19px;height:19px;display:grid;place-items:center;border:1px solid #b8c8d8;border-radius:4px;color:#62809d;font-size:10px}.warning-count{margin-left:auto;color:#b36b25;background:#fff0d9;border-radius:10px;padding:1px 6px;font-size:10px}.tree-empty{font-size:12px;line-height:1.5}.create-page{display:grid;gap:7px;margin-top:14px}.create-page select,.resource-card select{border:1px solid #cbd6e1;background:#fff;border-radius:6px;padding:7px 8px;color:#405268}.main-panel{min-width:0;padding:28px 34px 56px;background:#fff}.panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:25px}.panel-header h2{margin:5px 0 7px;font-size:29px;letter-spacing:-.04em}.panel-header p,.page-header p{margin:0;color:#738399;font-size:13px}.mode-pill,.readonly-label{display:inline-flex;align-items:center;padding:6px 9px;border:1px solid #d7e1ea;border-radius:999px;color:#65788c;background:#f7f9fb;font-size:11px;white-space:nowrap}.overview-grid{display:grid;grid-template-columns:1.45fr 1fr 1fr;gap:12px}.overview-card,.content-card{border:1px solid #dae3eb;border-radius:10px;background:#fbfcfd;padding:17px}.hero-card{background:linear-gradient(135deg,#f1f6fc,#fff)}.card-label,.preview-label{display:block;margin-bottom:13px;color:#7e90a3;font-size:10px;font-weight:750;letter-spacing:.1em;text-transform:uppercase}.hero-card strong{display:block;font-size:23px;letter-spacing:-.04em}.overview-card p{font-size:13px;color:#64768a;line-height:1.6}.stat-row{justify-content:flex-start;margin-top:22px;color:#718399;font-size:12px}.stat-row b{color:#203952;font-size:18px;margin-right:3px}.candidate{display:flex;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid #ebeff3;font-size:12px}.candidate:last-child{border-bottom:0}.candidate small,.empty-card span{color:#8b9aaa;font-size:10px}.empty-card{display:grid;gap:6px;padding:16px 0;color:#53677b;font-size:12px}.log-preview{display:grid;gap:10px}.log-preview div{display:grid;grid-template-columns:1fr auto;gap:3px;font-size:11px}.log-preview b{font-weight:650}.log-preview span,.log-preview time{color:#8b9aaa;font-size:10px}.log-preview time{grid-column:2;grid-row:1 / span 2}.callout{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:14px 0;padding:15px 17px;border:1px solid #c9dcef;border-radius:9px;background:#f3f8fd}.callout b{font-size:14px}.callout p{margin:5px 0 0;color:#687d91;font-size:12px}.callout button{border:1px solid #8eafd0;background:#fff;color:#356086;border-radius:6px;padding:7px 10px;white-space:nowrap}.lower-grid{display:grid;grid-template-columns:1.35fr 1fr;gap:12px;margin-top:12px}.content-card{min-height:180px}.topic-list{display:grid;gap:5px}.topic-list button{display:flex;align-items:center;gap:10px;border:0;border-radius:7px;background:transparent;text-align:left;padding:9px;color:#2d4359}.topic-list button:hover{background:#eef4f9}.topic-list button>span:last-child{margin-left:auto;color:#8ba0b3}.large-type{width:28px!important;height:28px!important;font-size:12px!important}.topic-list small,.impact-row small,.resource-card small,.citation-card small{display:block;color:#8494a5;font-size:10px;margin-top:3px}.impact-row{display:flex;align-items:flex-start;gap:9px;padding:8px 0}.status-dot{display:inline-block;flex:0 0 auto;width:8px;height:8px;margin-top:4px;border-radius:50%;background:#6d9a78}.status-dot.needs_review{background:#d59640}.status-dot.broken{background:#c95858}.count-warning{color:#bd6d31!important}.page-header{margin-bottom:14px}.title-input{display:block;width:100%;max-width:640px;border:0;border-bottom:1px solid transparent;padding:0;margin:5px 0 7px;color:#192c40;background:transparent;font-size:29px;font-weight:700;letter-spacing:-.04em;outline:none}.title-input:focus{border-bottom-color:#9cb8d5}.page-actions{align-items:flex-start}.editor-tabs{display:flex;align-items:center;gap:16px;border-bottom:1px solid #e1e7ed;margin-bottom:16px}.editor-tabs button{border:0;background:none;padding:8px 0;color:#8a9aaa;font-size:12px}.editor-tabs button.active{color:#2f6fed;border-bottom:2px solid #2f6fed}.editor-tabs label{margin-left:auto;color:#8797a7;font-size:11px}.editor-tabs code{color:#4e6882}.editor-layout{display:grid;grid-template-columns:1fr 1fr;gap:14px;min-height:420px}.editor-column,.preview-column{min-width:0;border:1px solid #d8e1e9;border-radius:8px;overflow:hidden}.markdown-editor{display:block;width:100%;height:390px;resize:vertical;border:0;padding:17px;background:#fbfcfd;color:#253b51;font:13px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;outline:none}.editor-foot{padding:8px 12px;border-top:1px solid #e1e7ed;color:#8b9aaa;font-size:10px}.preview-column{padding:17px;background:#fff}.markdown-preview{font-size:14px;line-height:1.7}.markdown-preview h2{font-size:22px;margin:0 0 16px}.markdown-preview h3{font-size:17px;margin:17px 0 7px}.markdown-preview h4{font-size:15px;margin:14px 0 5px}.markdown-preview p{margin:5px 0;color:#445b70}.markdown-preview li{margin-left:18px;color:#445b70}.markdown-gap{height:4px}.versions-section{margin-top:24px}.version-list{border:1px solid #dce4eb;border-radius:8px;margin-top:11px}.version-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border-bottom:1px solid #e7ecf1;font-size:12px}.version-row:last-child{border-bottom:0}.version-row.current{background:#f3f7fb}.version-row small{display:block;color:#8796a5;font-size:10px;margin-top:4px}.version-actions{display:flex;gap:5px}.version-actions button,.diff-header button{border:1px solid #ccd8e3;background:#fff;border-radius:5px;padding:6px 8px;color:#55718b;font-size:11px}.version-actions button:disabled{opacity:.4}.diff-box{margin-top:12px;border:1px solid #d5dee7;border-radius:8px;overflow:hidden}.diff-header{padding:9px 12px;background:#f4f7fa;color:#536b82;font-size:11px}.diff-box pre{margin:0;padding:13px;overflow:auto;background:#101820;color:#c5d1dc;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}.diff-box .added{display:block;color:#9ee0ae;background:#153423}.diff-box .removed{display:block;color:#f2a3a3;background:#3e1e22}.right-rail .rail-section{padding:18px}.citation-card{display:grid;gap:5px;padding:10px 0;border-bottom:1px solid #e4eaf0;font-size:12px}.citation-card:last-child{border-bottom:0}.citation-status{justify-content:flex-start;color:#71869b;font-size:10px}.citation-card a{color:#2f6fed;font-size:11px;text-decoration:none;margin-top:3px}.search-form{display:flex;gap:5px;margin:12px 0 7px}.upload-form{display:flex;gap:5px;align-items:center;margin-bottom:12px}.upload-form input{min-width:0;width:100%;font-size:11px;color:#74879a}.resource-card{display:grid;gap:7px;padding:10px 0;border-bottom:1px solid #e4eaf0}.resource-card>div:first-child{display:flex;justify-content:space-between;gap:7px}.resource-card select{font-size:11px}.readonly-label{justify-content:center;border-color:#e8c996;background:#fff7e9;color:#9a6b2d;font-size:10px}.search-results article{padding:9px 0;border-bottom:1px solid #e4eaf0;font-size:11px}.search-results p{margin:5px 0;color:#586f84;line-height:1.5}
-      .resource-actions{display:flex;flex-wrap:wrap;gap:5px}.resource-action{border:1px solid #cbd6e1;border-radius:6px;background:#fff;color:#55718b;padding:6px 8px;font-size:10px;cursor:pointer}.resource-action input{display:none}.resource-action:disabled{opacity:.45;cursor:not-allowed}
-      .log-page{max-width:1100px}.log-table{border:1px solid #dce4eb;border-radius:9px;overflow:hidden}.log-row{display:grid;grid-template-columns:150px 150px 1fr 1.5fr;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid #e7ecf1;font-size:12px}.log-row:last-child{border-bottom:0}.log-row time,.log-row span,.log-row small{color:#8191a1;font-size:10px}.log-row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.page-heading{min-width:0;flex:1}.metadata-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;max-width:640px;margin:12px 0}.metadata-grid label{display:grid;gap:4px;color:#8494a5;font-size:10px}.metadata-grid input,.metadata-grid select{min-width:0;width:100%;border:1px solid #cbd6e1;background:#fff;border-radius:6px;padding:7px 8px;color:#405268;font-size:11px}.citation-form{display:grid;gap:7px;margin-top:12px}.citation-form select,.citation-form input{min-width:0;width:100%;border:1px solid #cbd6e1;background:#fff;border-radius:6px;padding:8px;color:#405268;font-size:11px}.citation-form div{display:grid;grid-template-columns:1fr 1fr;gap:5px}.citation-form button,.citation-link{border:1px solid #b9ccdf;background:#f5f9fd;color:#356086;border-radius:6px;padding:8px;font-size:11px}.citation-form button:hover,.citation-link:hover{background:#e8f1fa}.citation-link{justify-self:start}.source-preview{max-height:180px;margin:4px 0;padding:9px;overflow:auto;border:1px solid #d8e2eb;border-radius:6px;background:#f7fafc;color:#526a80;white-space:pre-wrap;font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}.task-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid #e4eaf0;font-size:11px}.task-row:last-child{border-bottom:0}.task-row b,.task-row small{display:block}.task-row small{margin-top:3px;color:#8494a5;font-size:10px}.task-status{flex:0 0 auto;color:#5f7891;font-size:10px}.task-status.failed{color:#b24f4f}.task-status.retrying{color:#ad722e}
-      .retrieval-panel{margin-top:14px;border:1px solid #cbdceb;border-radius:10px;padding:17px;background:linear-gradient(135deg,#f8fbff,#fff)}.retrieval-subtitle{display:block;margin-top:4px;color:#8a9bad;font-size:10px}.retrieval-form{display:grid;grid-template-columns:minmax(180px,1fr) 150px 70px 70px 88px auto;gap:7px;margin-top:14px}.retrieval-form input,.retrieval-form select{min-width:0;border:1px solid #cbd6e1;background:#fff;border-radius:6px;padding:8px;color:#405268;font-size:11px}.retrieval-form .primary-button{padding:7px 12px}.scope-note{margin:9px 0 0;color:#718399;font-size:11px}.retrieval-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:14px}.retrieval-card{min-width:0;border:1px solid #dce5ed;border-radius:8px;background:#fff;padding:11px}.retrieval-heading{display:flex;align-items:center;justify-content:space-between;color:#526579;font-size:11px}.retrieval-heading span{color:#8a9bad}.retrieval-result{display:flex;align-items:flex-start;justify-content:space-between;gap:7px;width:100%;border:0;border-bottom:1px solid #edf1f4;background:transparent;color:#30465d;text-align:left;text-decoration:none;padding:9px 0;font-size:11px}.retrieval-result:last-of-type{border-bottom:0}.retrieval-result:hover{color:#2f6fed}.retrieval-result small{display:block;margin-top:4px;color:#8494a5;font-size:10px;line-height:1.35}.retrieval-result code{flex:0 0 auto;color:#8092a4;font-size:9px}.retrieval-result.static{cursor:default}.context-summary{display:grid;gap:4px;margin-top:12px;padding-top:10px;border-top:1px solid #e7edf2;color:#526579;font-size:11px}.context-summary span,.context-summary small{color:#8494a5;font-size:10px}.trace-line{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid #edf1f4;font-size:10px}.trace-line span{color:#8091a2;text-align:right}.trace-warning{margin-top:8px;padding:7px 8px;border-radius:5px;background:#fff5e5;color:#9a692a;font-size:10px}.retrieval-trace{background:#fbfdff}
-      .agent-launcher{background:#f2f7fc}.agent-launcher p{margin:10px 0;color:#72859a;font-size:11px;line-height:1.5}.agent-launch-actions,.agent-header-actions,.plan-actions{display:flex;flex-wrap:wrap;gap:6px}.agent-launch-actions button,.agent-header-actions button,.plan-actions button{border:1px solid #b9ccdf;background:#fff;color:#356086;border-radius:6px;padding:7px 9px;font-size:11px}.agent-launch-actions .primary-button,.agent-header-actions .primary-button,.plan-actions .primary-button{color:#fff;background:#2f6fed;border-color:#2f6fed}.agent-launch-actions button:disabled,.agent-header-actions button:disabled,.plan-actions button:disabled{cursor:not-allowed;opacity:.45}.agent-hint{display:block;margin-top:9px;color:#8494a5;font-size:10px;line-height:1.4}.agent-panel{margin-top:14px;border:1px solid #cbdceb;border-radius:10px;padding:17px;background:linear-gradient(135deg,#f8fbff,#fff)}.agent-plan{background:#fffdf8;border-color:#e5d8bc}.agent-panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:13px}.agent-panel-header h2{margin:4px 0 6px;font-size:20px;letter-spacing:-.03em}.agent-panel-header p{margin:0;color:#718399;font-size:11px}.agent-header-actions{align-items:flex-start}.agent-header-actions .mode-pill{font-size:10px}.chat-window{display:grid;gap:8px;max-height:420px;overflow:auto;padding:3px}.chat-message{max-width:88%;padding:10px 12px;border:1px solid #dce5ed;border-radius:8px;background:#fff;font-size:12px}.chat-message.user{justify-self:end;background:#edf5ff;border-color:#c9ddef}.chat-message-meta{display:flex;justify-content:space-between;gap:12px;color:#526b83;font-size:10px}.chat-message-meta span{color:#8a9bad}.chat-message p{margin:7px 0 0;color:#30465d;line-height:1.55;white-space:pre-wrap}.answer-meta,.plan-evidence{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;color:#67809a;font-size:10px}.chat-form{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:10px}.chat-form textarea{min-width:0;resize:vertical;border:1px solid #cbd6e1;border-radius:7px;padding:9px;color:#30465d;font-size:12px;line-height:1.5;outline:none}.chat-form textarea:focus{border-color:#80a7cf}.chat-form button{align-self:stretch}.plan-item{margin-top:9px;padding:12px;border:1px solid #e2d8c5;border-radius:8px;background:#fff}.plan-item-header{display:flex;justify-content:space-between;gap:10px;font-size:11px}.plan-item-header b{color:#425b73}.plan-item-header small{display:block;margin-top:4px;color:#8997a4;font-size:10px}.plan-item h3{margin:10px 0 7px;color:#263f58;font-size:14px}.plan-status{color:#6e7f8c;font-size:10px}.plan-status.applied{color:#2b7b4a}.plan-status.stale,.plan-status.apply_failed{color:#b04f4f}.plan-content,.plan-diff{max-height:170px;margin:0;padding:9px;overflow:auto;border:1px solid #e4e9ee;border-radius:6px;background:#f8fafc;color:#52697e;white-space:pre-wrap;font:10px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}.plan-diff{margin-top:7px;background:#101820;color:#c5d1dc}.plan-blocked{padding:7px 9px;border-radius:6px;background:#fff5e5;color:#9a692a;font-size:10px}.event-list{margin-top:8px;border-top:1px solid #e7edf2}.event-row{display:flex;justify-content:space-between;gap:7px;padding:6px 0;border-bottom:1px solid #edf1f4;font-size:10px}.event-row span{color:#8091a2}.agent-trace{background:#fbfdff}
-      @media(max-width:1100px){.workspace{grid-template-columns:220px minmax(0,1fr)}.right-rail{display:none}.main-panel{padding:24px}.overview-grid{grid-template-columns:1fr 1fr}.hero-card{grid-column:1 / -1}.retrieval-form{grid-template-columns:minmax(180px,1fr) 140px 64px 64px 82px auto}.retrieval-grid{grid-template-columns:1fr 1fr}.log-row{grid-template-columns:1fr 1fr}.log-row small{grid-column:1 / -1}}
-      @media(max-width:700px){.topbar{height:auto;align-items:flex-start;padding:14px 16px}.topbar-state{display:none}.workspace{display:block}.left-rail{border-right:0}.main-panel{padding:20px 16px}.overview-grid,.lower-grid,.editor-layout,.metadata-grid,.retrieval-grid{grid-template-columns:1fr}.retrieval-form{grid-template-columns:1fr 1fr}.retrieval-form input[name=query],.retrieval-form button{grid-column:1 / -1}.hero-card{grid-column:auto}.panel-header{display:block}.page-actions{margin-top:15px}.editor-layout{min-height:0}.markdown-editor{height:320px}.version-row{align-items:flex-start;display:block}.version-actions{margin-top:9px}}
-    `}</style>
-    <style jsx>{`.wiki-tree-node{display:grid}.wiki-tree-row{display:grid;grid-template-columns:20px 1fr;align-items:center;gap:2px}.wiki-tree-row>input{justify-self:center}.agent-scope-summary{display:grid;gap:7px;margin:10px 0;padding:9px;border:1px solid #d7e4ef;border-radius:7px;background:#fff;color:#526579;font-size:10px}.agent-scope-summary>div{display:flex;justify-content:space-between;gap:8px}.agent-scope-summary>div span,.agent-scope-summary small,.source-check small{color:#8494a5;font-size:10px}.agent-scope-summary button{justify-self:start;border:1px solid #c5d5e3;background:#fff;border-radius:5px;padding:5px 7px;color:#356086;font-size:10px}.agent-scope-summary label{display:grid;gap:4px;color:#72859a}.agent-scope-summary select{border:1px solid #cbd6e1;background:#fff;border-radius:5px;padding:6px;color:#405268;font-size:10px}.source-check{display:flex;align-items:flex-start;gap:7px;padding:8px 0;border-bottom:1px solid #e4eaf0;color:#405268;font-size:11px}.source-check:last-child{border-bottom:0}.source-check span{min-width:0}.source-check b,.source-check small{display:block}.plan-summary{display:flex;justify-content:space-between;gap:8px;margin:8px 0;color:#526579;font-size:10px}.plan-summary span{color:#8494a5;text-align:right}.plan-edit-form{display:grid;gap:7px}.plan-edit-form input,.plan-edit-form select,.plan-edit-form textarea{min-width:0;width:100%;border:1px solid #cbd6e1;border-radius:6px;padding:7px;background:#fff;color:#30465d;font-size:11px}.plan-edit-form textarea{resize:vertical;line-height:1.5}`}</style>
+    </div>}
   </div>;
 }

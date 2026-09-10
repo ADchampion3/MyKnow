@@ -1,3 +1,5 @@
+import "./workspace.css";
+
 export const metadata = {
   title: "MyKnow",
   description: "Personal knowledge workspace"

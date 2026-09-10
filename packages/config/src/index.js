@@ -3,6 +3,9 @@ const positiveInt = (name, value, fallback) => {
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive integer`);
   return parsed;
 };
+const resourceMaxBytes = (value) => String(value ?? "").trim().toLowerCase() === "unlimited"
+  ? Number.POSITIVE_INFINITY
+  : positiveInt("RESOURCE_MAX_BYTES", value, 2_000_000);
 const boundedInt = (name, value, fallback, minimum, maximum) => {
   const parsed = Number(value ?? fallback);
   if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
@@ -30,7 +33,7 @@ export function loadConfig(env = process.env) {
     webPort: positiveInt("WEB_PORT", env.WEB_PORT, 3000),
     workerPollIntervalMs: positiveInt("WORKER_POLL_INTERVAL_MS", env.WORKER_POLL_INTERVAL_MS, 1000),
     resourceStorageDir: path.resolve(repoRoot, env.RESOURCE_STORAGE_DIR || "data/resources"),
-    resourceMaxBytes: positiveInt("RESOURCE_MAX_BYTES", env.RESOURCE_MAX_BYTES, 2_000_000),
+    resourceMaxBytes: resourceMaxBytes(env.RESOURCE_MAX_BYTES),
     resourceParserTimeoutMs: positiveInt("RESOURCE_PARSER_TIMEOUT_MS", env.RESOURCE_PARSER_TIMEOUT_MS, 120_000),
     modelProvider: provider,
     modelName: env.MODEL_NAME || (provider === "mock" ? "myknow-mock" : "deepseek-chat"),

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { readBytes, sha256 } from "./resources.js";
+import { now, readBytes, sha256 } from "./resources.js";
 import { cosineSimilarity, createEmbeddingProvider } from "./embeddings.js";
 import { estimateTokens, tokenizeText } from "./text-tokenizer.js";
 
@@ -644,7 +644,7 @@ export const queueEmbeddingTask = (sqlite, { ownerType, ownerId, pageVersionId =
   const id = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   const payload = { reason, ownerType, ownerId, versionKey, pageVersionId, resourceVersionId, processingRunId };
-  sqlite.prepare("INSERT INTO tasks (id,type,resource_version_id,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,?,'queued',0,3,0,?,?)").run(id, "retrieval:embed", ownerType === "raw_chunk" ? resourceVersionId : null, JSON.stringify(payload), timestamp, timestamp);
+  sqlite.prepare("INSERT INTO tasks (id,type,resource_version_id,processing_run_id,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,?,?,'queued',0,3,0,?,?)").run(id, "retrieval:embed", ownerType === "raw_chunk" ? resourceVersionId : null, ownerType === "raw_chunk" ? processingRunId : null, JSON.stringify(payload), timestamp, timestamp);
   activeTaskCache?.set(key, id);
   return taskPayload(sqlite, id);
 };

@@ -7,5 +7,6 @@ export * from "./ocr.js";
 export * from "./wiki.js";
 export * from "./embeddings.js";
 export * from "./retrieval.js";
+export * from "./embedding-progress.js";
 export * from "./derived-cleanup.js";
 export * from "./agent.js";

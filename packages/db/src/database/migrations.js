@@ -1,4 +1,5 @@
-const SCHEMA_VERSION = "retrieval-query-256-agent-citation-policy-v1";
+const SCHEMA_VERSION = "retrieval-query-256-agent-citation-policy-embedding-progress-v1";
+const EMBEDDING_PROGRESS_PREVIOUS_SCHEMA_VERSION = "retrieval-query-256-agent-citation-policy-v1";
 const AGENT_CITATION_PREVIOUS_SCHEMA_VERSION = "retrieval-query-256-v1";
 const QUERY_PREVIOUS_SCHEMA_VERSION = "sprint6-personal-acceptance-v1";
 const PREVIOUS_SCHEMA_VERSION = "sprint5-agent-tree-v1";
@@ -27,6 +28,19 @@ CREATE INDEX agent_plan_items_run_idx ON agent_plan_items(run_id, ordinal);
 CREATE INDEX agent_plan_items_review_idx ON agent_plan_items(review_status, application_status, created_at);
 `;
 
+const applyEmbeddingProgressMigration = (sqlite) => {
+  if (!tableHasColumn(sqlite, "tasks", "processing_run_id")) sqlite.exec("ALTER TABLE tasks ADD COLUMN processing_run_id TEXT REFERENCES processing_runs(id);");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS tasks_processing_run_idx ON tasks(processing_run_id,type,status,created_at,id);");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS retrieval_embeddings_run_idx ON retrieval_embeddings(processing_run_id,owner_type,status,updated_at,id);");
+  const update = sqlite.prepare("UPDATE tasks SET processing_run_id=? WHERE id=? AND processing_run_id IS NULL");
+  for (const task of sqlite.prepare("SELECT id,payload FROM tasks WHERE type='retrieval:embed' AND processing_run_id IS NULL").all()) {
+    try {
+      const processingRunId = JSON.parse(task.payload || "{}").processingRunId;
+      if (typeof processingRunId === "string" && processingRunId) update.run(processingRunId, task.id);
+    } catch {}
+  }
+};
+
 const migration = `
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE knowledge_bases (id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120), description TEXT, chunking_config TEXT, wiki_default_mode TEXT NOT NULL DEFAULT 'enabled' CHECK(wiki_default_mode IN ('enabled','retrieval_only')), status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(name));
@@ -35,7 +49,7 @@ CREATE TABLE tags (id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL REFERENC
 CREATE TABLE resources (id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120), source_type TEXT NOT NULL CHECK(source_type IN ('text','file')), wiki_mode TEXT CHECK(wiki_mode IS NULL OR wiki_mode IN ('enabled','retrieval_only')), status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','indexed','degraded','failed','archived')), current_version_id TEXT REFERENCES resource_versions(id) DEFERRABLE INITIALLY DEFERRED, archived_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE resource_versions (id TEXT PRIMARY KEY, resource_id TEXT NOT NULL REFERENCES resources(id), content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64), storage_key TEXT NOT NULL, mime_type TEXT NOT NULL, byte_size INTEGER NOT NULL CHECK(byte_size > 0), original_filename TEXT, title TEXT, parser_name TEXT, parser_version TEXT, parse_duration_ms INTEGER, chunking_config TEXT, ocr_mode TEXT NOT NULL DEFAULT 'off' CHECK(ocr_mode IN ('auto','off','force')), ocr_provider TEXT CHECK(ocr_provider IS NULL OR ocr_provider IN ('local','cloud','paddleocr')), ocr_capabilities TEXT, active_processing_run_id TEXT REFERENCES processing_runs(id) DEFERRABLE INITIALLY DEFERRED, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','indexed','failed')), error_summary TEXT, idempotency_key TEXT UNIQUE, request_fingerprint TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, CHECK(mime_type <> 'application/pdf' OR ocr_provider IS NOT NULL));
 CREATE TABLE resource_knowledge_bases (resource_id TEXT NOT NULL REFERENCES resources(id), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), created_at TEXT NOT NULL, PRIMARY KEY(resource_id, knowledge_base_id));
-CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT NOT NULL, resource_version_id TEXT REFERENCES resource_versions(id), payload TEXT, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','succeeded','failed','retrying')), progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100), retry_limit INTEGER NOT NULL DEFAULT 3 CHECK(retry_limit > 0), retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0), next_attempt_at TEXT, worker_id TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)), error_code TEXT, error_summary TEXT, started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT NOT NULL, resource_version_id TEXT REFERENCES resource_versions(id), processing_run_id TEXT REFERENCES processing_runs(id), payload TEXT, status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','succeeded','failed','retrying')), progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100), retry_limit INTEGER NOT NULL DEFAULT 3 CHECK(retry_limit > 0), retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0), next_attempt_at TEXT, worker_id TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)), error_code TEXT, error_summary TEXT, started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE task_attempts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), attempt_number INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed')), worker_id TEXT, started_at TEXT NOT NULL, finished_at TEXT, error_code TEXT, error_summary TEXT, UNIQUE(task_id, attempt_number));
 CREATE TABLE audit_logs (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, request_id TEXT, metadata TEXT, created_at TEXT NOT NULL);
 CREATE TABLE processing_runs (id TEXT PRIMARY KEY, resource_version_id TEXT NOT NULL REFERENCES resource_versions(id), status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','indexed','failed','superseded')), parser_name TEXT, parser_version TEXT, chunker_name TEXT, chunker_version TEXT, chunking_config TEXT, input_sha256 TEXT CHECK(input_sha256 IS NULL OR length(input_sha256)=64), requested_ocr_mode TEXT CHECK(requested_ocr_mode IS NULL OR requested_ocr_mode IN ('auto','off','force')), requested_ocr_provider TEXT CHECK(requested_ocr_provider IS NULL OR requested_ocr_provider IN ('local','cloud','paddleocr')), actual_provider TEXT CHECK(actual_provider IS NULL OR actual_provider IN ('local','cloud','paddleocr')), adapter_name TEXT, adapter_version TEXT, model_name TEXT, model_version TEXT, provider_request_id TEXT, duration_ms INTEGER, page_count INTEGER, capabilities TEXT, metrics TEXT, canonical_storage_key TEXT, canonical_sha256 TEXT, canonical_byte_size INTEGER, block_count INTEGER NOT NULL DEFAULT 0, parent_count INTEGER NOT NULL DEFAULT 0, child_count INTEGER NOT NULL DEFAULT 0, output_sha256 TEXT, warning_count INTEGER NOT NULL DEFAULT 0, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -48,6 +62,7 @@ CREATE INDEX processing_runs_version_idx ON processing_runs(resource_version_id,
 CREATE INDEX chunks_version_idx ON chunks(resource_version_id, processing_run_id, sequence);
 CREATE INDEX chunks_parent_idx ON chunks(parent_chunk_id);
 CREATE INDEX tasks_resource_version_idx ON tasks(resource_version_id, created_at);
+CREATE INDEX tasks_processing_run_idx ON tasks(processing_run_id,type,status,created_at,id);
 CREATE UNIQUE INDEX tasks_resource_active_idx ON tasks(resource_version_id) WHERE type='resource:process' AND resource_version_id IS NOT NULL AND status IN ('queued','running','retrying');
 CREATE TABLE wiki_pages (id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), parent_page_id TEXT REFERENCES wiki_pages(id), slug TEXT NOT NULL CHECK(length(trim(slug)) BETWEEN 1 AND 160), title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200), page_type TEXT NOT NULL CHECK(page_type IN ('index','log','concept','entity','source-summary','synthesis')), status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived','system')), current_version_id TEXT REFERENCES wiki_page_versions(id) DEFERRABLE INITIALLY DEFERRED, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(knowledge_base_id, slug));
 CREATE TABLE wiki_page_versions (id TEXT PRIMARY KEY, page_id TEXT NOT NULL REFERENCES wiki_pages(id), parent_version_id TEXT REFERENCES wiki_page_versions(id), template_version_id TEXT REFERENCES wiki_template_versions(id), content_markdown TEXT NOT NULL, content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64), change_summary TEXT, restore_of_version_id TEXT REFERENCES wiki_page_versions(id), created_at TEXT NOT NULL);
@@ -70,6 +85,7 @@ CREATE INDEX wiki_link_edges_source_idx ON wiki_link_edges(source_page_id, sourc
 CREATE TABLE retrieval_embeddings (id TEXT PRIMARY KEY, owner_type TEXT NOT NULL CHECK(owner_type IN ('wiki_page','raw_chunk')), owner_id TEXT NOT NULL, version_key TEXT NOT NULL, page_version_id TEXT REFERENCES wiki_page_versions(id), resource_version_id TEXT REFERENCES resource_versions(id), processing_run_id TEXT REFERENCES processing_runs(id), provider TEXT NOT NULL, model TEXT NOT NULL, dimensions INTEGER NOT NULL DEFAULT 0 CHECK(dimensions >= 0 AND dimensions <= 4096), input_sha256 TEXT CHECK(input_sha256 IS NULL OR length(input_sha256)=64), vector_json TEXT, status TEXT NOT NULL DEFAULT 'ready' CHECK(status IN ('ready','failed')), error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(owner_type, owner_id, version_key, provider, model), CHECK((owner_type='wiki_page' AND page_version_id IS NOT NULL AND resource_version_id IS NULL) OR (owner_type='raw_chunk' AND resource_version_id IS NOT NULL AND page_version_id IS NULL)));
 CREATE INDEX retrieval_embeddings_wiki_idx ON retrieval_embeddings(owner_type, page_version_id, status);
 CREATE INDEX retrieval_embeddings_raw_idx ON retrieval_embeddings(owner_type, resource_version_id, status);
+CREATE INDEX retrieval_embeddings_run_idx ON retrieval_embeddings(processing_run_id, owner_type, status, updated_at, id);
 CREATE INDEX retrieval_embeddings_input_idx ON retrieval_embeddings(owner_type, input_sha256, provider, model, dimensions, status);
 CREATE TABLE retrieval_runs (id TEXT PRIMARY KEY, query TEXT NOT NULL CHECK(length(trim(query)) BETWEEN 1 AND 256), knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id), space_id TEXT REFERENCES spaces(id), wiki_top_k INTEGER NOT NULL CHECK(wiki_top_k BETWEEN 1 AND 20), raw_top_k INTEGER NOT NULL CHECK(raw_top_k BETWEEN 1 AND 20), context_budget_tokens INTEGER NOT NULL CHECK(context_budget_tokens BETWEEN 1 AND 50000), wiki_budget_tokens INTEGER NOT NULL CHECK(wiki_budget_tokens >= 0), raw_budget_tokens INTEGER NOT NULL CHECK(raw_budget_tokens >= 0), vector_enabled INTEGER NOT NULL DEFAULT 0 CHECK(vector_enabled IN (0,1)), vector_provider TEXT, vector_model TEXT, status TEXT NOT NULL DEFAULT 'succeeded' CHECK(status IN ('succeeded','failed')), wiki_seeds TEXT NOT NULL, raw_seeds TEXT NOT NULL, graph_expansion TEXT NOT NULL, provenance_lookups TEXT NOT NULL, context_items TEXT NOT NULL, context_markdown TEXT NOT NULL, metrics TEXT NOT NULL, vector_status TEXT NOT NULL, trace_json TEXT NOT NULL, error_code TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);
@@ -113,14 +129,23 @@ export function migrate(sqlite) {
         sqlite.exec(tableSql.replace("CREATE TABLE retrieval_runs", "CREATE TABLE retrieval_runs_new"));
         sqlite.exec("INSERT INTO retrieval_runs_new SELECT * FROM retrieval_runs; DROP TABLE retrieval_runs; ALTER TABLE retrieval_runs_new RENAME TO retrieval_runs; CREATE INDEX retrieval_runs_scope_idx ON retrieval_runs(knowledge_base_id, created_at, id);");
         applyAgentCitationMigration(sqlite);
+        applyEmbeddingProgressMigration(sqlite);
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='derived_schema'").run("sprint6-personal-derived-ready", timestamp);
+      })();
+      return { fresh: false, migratedFrom: marker.value, schemaVersion: SCHEMA_VERSION };
+    }
+    if (marker?.value === EMBEDDING_PROGRESS_PREVIOUS_SCHEMA_VERSION) {
+      sqlite.transaction(() => {
+        applyEmbeddingProgressMigration(sqlite);
+        sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
       })();
       return { fresh: false, migratedFrom: marker.value, schemaVersion: SCHEMA_VERSION };
     }
     if (marker?.value === AGENT_CITATION_PREVIOUS_SCHEMA_VERSION) {
       sqlite.transaction(() => {
         applyAgentCitationMigration(sqlite);
+        applyEmbeddingProgressMigration(sqlite);
         sqlite.prepare("UPDATE schema_meta SET value=?,updated_at=? WHERE key='schema_version'").run(SCHEMA_VERSION, timestamp);
       })();
       return { fresh: false, migratedFrom: marker.value, schemaVersion: SCHEMA_VERSION };

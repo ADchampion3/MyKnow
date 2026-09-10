@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
-import { refreshResourceStatus, tasks } from "@myknow/db";
+import { reconcileEmbeddingProgress, refreshResourceStatus, tasks } from "@myknow/db";
 import { desc, eq } from "drizzle-orm";
 
 const agentRunForTask = (task) => { try { return JSON.parse(task.payload || "{}").agentRunId || null; } catch { return null; } };
+const processingRunForTask = (task) => task.processingRunId || task.processing_run_id || (() => { try { return JSON.parse(task.payload || "{}").processingRunId || null; } catch { return null; } })();
 
 export const handleTaskRoutes = ({ ctx, request }) => {
   const { pathname, method, body, requestId, res } = request;
@@ -31,8 +32,10 @@ export const handleTaskRoutes = ({ ctx, request }) => {
     if (!task) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
     if (["succeeded", "failed"].includes(task.status)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only queued or running tasks can be cancelled"), requestId); return true; }
     const timestamp = ctx.now();
+    let changed = false;
     sqlite.transaction(() => {
-      sqlite.prepare("UPDATE tasks SET cancel_requested=1,status=CASE WHEN status IN ('queued','retrying') THEN 'failed' ELSE status END,error_code=CASE WHEN status IN ('queued','retrying') THEN 'TASK_CANCELLED' ELSE error_code END,error_summary=CASE WHEN status IN ('queued','retrying') THEN 'Task cancellation requested' ELSE error_summary END,finished_at=CASE WHEN status IN ('queued','retrying') THEN ? ELSE finished_at END,updated_at=? WHERE id=?").run(timestamp, timestamp, task.id);
+      changed = Boolean(sqlite.prepare("UPDATE tasks SET cancel_requested=1,status=CASE WHEN status IN ('queued','retrying') THEN 'failed' ELSE status END,error_code=CASE WHEN status IN ('queued','retrying') THEN 'TASK_CANCELLED' ELSE error_code END,error_summary=CASE WHEN status IN ('queued','retrying') THEN 'Task cancellation requested' ELSE error_summary END,finished_at=CASE WHEN status IN ('queued','retrying') THEN ? ELSE finished_at END,updated_at=? WHERE id=? AND status IN ('queued','running','retrying')").run(timestamp, timestamp, task.id).changes);
+      if (!changed) return;
       if (task.type === "resource:process" && ["queued", "retrying"].includes(task.status)) {
         const resourceVersionId = task.resource_version_id || (() => { try { return JSON.parse(task.payload || "{}").resourceVersionId; } catch { return null; } })();
         const version = resourceVersionId && ctx.version(resourceVersionId);
@@ -46,8 +49,10 @@ export const handleTaskRoutes = ({ ctx, request }) => {
         sqlite.prepare("UPDATE agent_runs SET status='cancelled',error_code='TASK_CANCELLED',error_summary='Task cancellation requested',updated_at=? WHERE id=?").run(timestamp, agentRunId);
         sqlite.prepare("UPDATE chat_messages SET status='failed',error_code='TASK_CANCELLED',error_summary='Task cancellation requested',updated_at=? WHERE agent_run_id=? AND role='assistant' AND status IN ('pending','retrying')").run(timestamp, agentRunId);
       }
+      if (task.type === "retrieval:embed" && processingRunForTask(task)) reconcileEmbeddingProgress(sqlite, { processingRunId: processingRunForTask(task), config: ctx.config, audit: (eventType, entityType, entityId, metadata) => ctx.audit(eventType, entityType, entityId, requestId, metadata) });
       ctx.audit("cancel_requested", "task", task.id, requestId, { status: task.status });
     })();
+    if (!changed) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Task is no longer cancellable"), requestId); return true; }
     ctx.json(res, 202, ctx.taskView(sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id)), null, requestId);
     return true;
   }
@@ -57,6 +62,11 @@ export const handleTaskRoutes = ({ ctx, request }) => {
     const task = db.select().from(tasks).where(eq(tasks.id, retryTaskMatch[1])).get();
     if (!task) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
     if (task.status !== "failed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed tasks can be retried"), requestId); return true; }
+    const processingRunId = processingRunForTask(task);
+    if (task.type === "retrieval:embed" && processingRunId && sqlite.prepare("SELECT status FROM processing_runs WHERE id=?").get(processingRunId)?.status === "superseded") {
+      ctx.json(res, 409, null, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task belongs to a superseded processing run"), requestId);
+      return true;
+    }
     if (task.retryCount >= task.retryLimit && task.type !== "resource:process") { ctx.json(res, 409, null, ctx.error("TASK_RETRY_LIMIT", "Task retry limit reached"), requestId); return true; }
     const timestamp = ctx.now();
     const resourceVersionId = task.resourceVersionId ?? task.resource_version_id ?? null;
@@ -78,8 +88,8 @@ export const handleTaskRoutes = ({ ctx, request }) => {
         sqlite.prepare("UPDATE chat_messages SET status='pending',error_code=NULL,error_summary=NULL,updated_at=? WHERE agent_run_id=? AND role='assistant'").run(timestamp, agentRunId);
         replacement = sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id);
       } else {
-        replacement = { id: crypto.randomUUID(), type: task.type, payload: task.payload, status: "queued", progress: 0, retryLimit, retryCount: 0, createdAt: timestamp, updatedAt: timestamp };
-        sqlite.prepare("INSERT INTO tasks (id,type,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,'queued',0,?,0,?,?)").run(replacement.id, replacement.type, replacement.payload, retryLimit, timestamp, timestamp);
+        replacement = { id: crypto.randomUUID(), type: task.type, resourceVersionId, processingRunId, payload: task.payload, status: "queued", progress: 0, retryLimit, retryCount: 0, createdAt: timestamp, updatedAt: timestamp };
+        sqlite.prepare("INSERT INTO tasks (id,type,resource_version_id,processing_run_id,payload,status,progress,retry_limit,retry_count,created_at,updated_at) VALUES (?,?,?,?,?,'queued',0,?,0,?,?)").run(replacement.id, replacement.type, resourceVersionId, processingRunId, replacement.payload, retryLimit, timestamp, timestamp);
       }
       ctx.audit("retry_requested", "task", task.id, requestId, { replacementTaskId: replacement.id });
     })();

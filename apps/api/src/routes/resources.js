@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { chunkDocument, codePointLength, contentStorageKey, externalWikiMode, mimeForExtension, normalizeCanonicalText, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, refreshResourceStatus, sha256, supportedMime } from "@myknow/db";
+import { redactSecrets } from "@myknow/config";
+import { cancelEmbeddingTasksForRun, chunkDocument, codePointLength, contentStorageKey, embeddingProgressForRun, embeddingProgressForVersion, embeddingTasksForRun, externalWikiMode, mimeForExtension, normalizeCanonicalText, normalizeChunkingConfig, normalizeOcrProcessingRequest, normalizeWikiMode, persistBytes, processingRequestFromVersion, readBytes, reconcileEmbeddingProgress, refreshResourceStatus, retryEmbeddingTasksForRun, sha256, supportedMime } from "@myknow/db";
 
 const textMimes = new Set(["text/plain", "text/markdown"]);
 const resourceStatuses = new Set(["pending", "processing", "indexed", "degraded", "failed", "archived"]);
@@ -68,12 +69,13 @@ const chunkingFor = (sqlite, resourceId, kbId) => {
 };
 
 const taskFor = (ctx, versionId) => ctx.taskView(ctx.taskForVersion(versionId));
-const versionPayload = (ctx, row) => ctx.versionView(row);
+const versionPayload = (ctx, row) => ({ ...ctx.versionView(row), embeddingProgress: redactSecrets(embeddingProgressForVersion(ctx.sqlite, row.id, ctx.config)) });
 const resourcePayload = (ctx, row) => {
   if (!row) return null;
   const versions = ctx.sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(row.id).map((version) => versionPayload(ctx, version));
   const latest = versions[0];
   const result = { ...ctx.resourceView(row), currentVersion: versions.find((version) => version.id === row.current_version_id) || null, latestVersion: latest || null, versions, task: latest ? taskFor(ctx, latest.id) : null };
+  result.embeddingProgress = result.currentVersion?.embeddingProgress || result.latestVersion?.embeddingProgress || null;
   result.wikiMode = row.wiki_mode ? externalWikiMode(row.wiki_mode) : null;
   result.wikiModeByKnowledgeBase = ctx.sqlite.prepare("SELECT rkb.knowledge_base_id AS knowledgeBaseId, CASE WHEN r.wiki_mode IS NULL THEN kb.wiki_default_mode ELSE r.wiki_mode END AS mode FROM resource_knowledge_bases rkb JOIN resources r ON r.id=rkb.resource_id JOIN knowledge_bases kb ON kb.id=rkb.knowledge_base_id WHERE r.id=? ORDER BY rkb.knowledge_base_id").all(row.id).map((item) => ({ ...item, mode: externalWikiMode(item.mode) }));
   return result;
@@ -256,8 +258,50 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   const processingRunsMatch = pathname.match(/^\/api\/resources\/([^/]+)\/processing-runs$/);
   if (processingRunsMatch && method === "GET") {
     if (!ctx.resource(processingRunsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    const runs = sqlite.prepare("SELECT pr.*,rv.resource_id,rv.content_sha256 AS source_sha256 FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE rv.resource_id=? ORDER BY pr.created_at DESC,pr.id DESC").all(processingRunsMatch[1]);
-    ctx.json(res, 200, runs.map((run) => ({ ...ctx.runView(run), attempts: sqlite.prepare("SELECT id,processing_run_id,reader_name,reader_version,status,error_code,error_summary,metadata,started_at,finished_at FROM processing_run_attempts WHERE processing_run_id=? ORDER BY started_at,id").all(run.id) })), null, requestId);
+    const runs = sqlite.prepare("SELECT pr.*,rv.resource_id,r.name AS resource_name,rv.content_sha256 AS source_sha256 FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id JOIN resources r ON r.id=rv.resource_id WHERE rv.resource_id=? ORDER BY pr.created_at DESC,pr.id DESC").all(processingRunsMatch[1]);
+    ctx.json(res, 200, runs.map((run) => ({ ...ctx.runView(run), error_summary: run.error_summary ? redactSecrets(run.error_summary) : null, resourceId: run.resource_id, resourceVersionId: run.resource_version_id, resourceName: run.resource_name, embeddingProgress: redactSecrets(embeddingProgressForRun(sqlite, run.id, config)), attempts: sqlite.prepare("SELECT id,processing_run_id,reader_name,reader_version,status,error_code,error_summary,metadata,started_at,finished_at FROM processing_run_attempts WHERE processing_run_id=? ORDER BY started_at,id").all(run.id).map((attempt) => ({ ...attempt, error_summary: attempt.error_summary ? redactSecrets(attempt.error_summary) : null })) })), null, requestId);
+    return true;
+  }
+
+  const embeddingTasksMatch = pathname.match(/^\/api\/resources\/([^/]+)\/processing-runs\/([^/]+)\/embedding-tasks$/);
+  if (embeddingTasksMatch && method === "GET") {
+    const resource = ctx.resource(embeddingTasksMatch[1]);
+    const run = resource && sqlite.prepare("SELECT pr.* FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(embeddingTasksMatch[2], resource.id);
+    if (!run) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Processing run not found"), requestId); return true; }
+    const page = Number(parsed.searchParams.get("page") || 1);
+    const limit = Number(parsed.searchParams.get("limit") || 50);
+    const status = parsed.searchParams.get("status") || null;
+    const errorCode = parsed.searchParams.get("errorCode") || null;
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (status && !new Set(["ready", "queued", "running", "retrying", "failed", "cancelled", "missing"]).has(status)) || (errorCode && (errorCode.length > 120 || !/^[A-Z0-9_:-]+$/.test(errorCode)))) {
+      ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/status/errorCode is invalid"), requestId);
+      return true;
+    }
+    const detail = embeddingTasksForRun(sqlite, { processingRunId: run.id, page, limit, status, errorCode, config });
+    const safeDetail = { ...detail, items: detail.items.map((item) => ({ ...item, errorSummary: item.errorSummary ? redactSecrets(item.errorSummary) : null })) };
+    ctx.json(res, 200, { ...safeDetail, progress: redactSecrets(embeddingProgressForRun(sqlite, run.id, config)) }, null, requestId);
+    return true;
+  }
+
+  const embeddingRunActionMatch = pathname.match(/^\/api\/resources\/([^/]+)\/processing-runs\/([^/]+)\/(cancel|retry)$/);
+  if (embeddingRunActionMatch && method === "POST") {
+    const resource = ctx.resource(embeddingRunActionMatch[1]);
+    const run = resource && sqlite.prepare("SELECT pr.*,rv.active_processing_run_id AS active_processing_run_id FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(embeddingRunActionMatch[2], resource.id);
+    if (!run) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Processing run not found"), requestId); return true; }
+    if (resource.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot control embedding tasks"), requestId); return true; }
+    if (run.status === "superseded") { ctx.json(res, 409, null, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task belongs to a superseded processing run"), requestId); return true; }
+    if (run.status !== "indexed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only indexed processing runs can control embedding tasks"), requestId); return true; }
+    if (run.active_processing_run_id && run.active_processing_run_id !== run.id) { ctx.json(res, 409, null, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task is no longer part of the active resource generation"), requestId); return true; }
+    const action = embeddingRunActionMatch[3];
+    if (action === "cancel") {
+      const result = cancelEmbeddingTasksForRun(sqlite, { processingRunId: run.id, config });
+      const progress = reconcileEmbeddingProgress(sqlite, { processingRunId: run.id, config, audit: (eventType, entityType, entityId, metadata) => ctx.audit(eventType, entityType, entityId, requestId, metadata) });
+      if (result.requested) ctx.audit("embedding_cancel_requested", "processing_run", run.id, requestId, { processingRunId: run.id, requested: result.requested, immediate: result.immediate, running: result.running });
+      ctx.json(res, result.requested ? 202 : 200, { action, ...result, progress: redactSecrets(progress) }, null, requestId);
+      return true;
+    }
+    const result = retryEmbeddingTasksForRun(sqlite, { processingRunId: run.id, config });
+    if (result.queued) ctx.audit("embedding_retry_requested", "processing_run", run.id, requestId, { processingRunId: run.id, queued: result.queued, byStatus: result.byStatus });
+    ctx.json(res, result.queued ? 202 : 200, { action, ...result, progress: redactSecrets(result.progress) }, null, requestId);
     return true;
   }
 

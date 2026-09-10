@@ -32,9 +32,7 @@ const isoNow = (ctx) => ctx.now();
 
 const queuePageEmbedding = (ctx, pageId, pageVersionId, requestId, reason) => {
   if (ctx.config.retrievalVectorEnabled === false) return null;
-  const task = queueEmbeddingTask(ctx.sqlite, { ownerType: "wiki_page", ownerId: pageId, pageVersionId, reason });
-  if (task?.id) ctx.audit("queued", "task", task.id, requestId, { type: "retrieval:embed", ownerType: "wiki_page", ownerId: pageId, pageVersionId });
-  return task;
+  return queueEmbeddingTask(ctx.sqlite, { ownerType: "wiki_page", ownerId: pageId, pageVersionId, reason });
 };
 
 const ensureTemplates = (sqlite, knowledgeBaseId) => sqlite.transaction(() => {
@@ -296,14 +294,14 @@ const overview = (ctx, knowledgeBaseId) => {
     kb_resources AS (SELECT r.id FROM resources r JOIN resource_knowledge_bases rkb ON rkb.resource_id=r.id WHERE rkb.knowledge_base_id=(SELECT id FROM scope)),
     kb_versions AS (SELECT rv.id FROM resource_versions rv WHERE rv.resource_id IN (SELECT id FROM kb_resources)),
     kb_runs AS (SELECT pr.id FROM processing_runs pr WHERE pr.resource_version_id IN (SELECT id FROM kb_versions)),
-    kb_tasks AS (SELECT t.id FROM tasks t WHERE t.resource_version_id IN (SELECT id FROM kb_versions)),
+    kb_tasks AS (SELECT t.id,t.type FROM tasks t WHERE t.resource_version_id IN (SELECT id FROM kb_versions) OR t.processing_run_id IN (SELECT id FROM kb_runs)),
     kb_pages AS (SELECT id FROM wiki_pages WHERE knowledge_base_id=(SELECT id FROM scope)),
     kb_page_versions AS (SELECT id FROM wiki_page_versions WHERE page_id IN (SELECT id FROM kb_pages)),
     kb_citations AS (SELECT id FROM wiki_citations WHERE page_version_id IN (SELECT id FROM kb_page_versions)),
     kb_templates AS (SELECT id FROM wiki_templates WHERE knowledge_base_id=(SELECT id FROM scope))
     SELECT id,event_type,entity_type,entity_id,metadata,created_at
     FROM audit_logs
-    WHERE (entity_type='knowledge_base' AND entity_id=(SELECT id FROM scope))
+    WHERE (entity_type='knowledge_base' AND entity_id=(SELECT id FROM scope)
       OR (entity_type='space' AND entity_id IN (SELECT id FROM kb_spaces))
       OR (entity_type='tag' AND entity_id IN (SELECT id FROM kb_tags))
       OR (entity_type='resource' AND entity_id IN (SELECT id FROM kb_resources))
@@ -314,7 +312,10 @@ const overview = (ctx, knowledgeBaseId) => {
       OR (entity_type='wiki_page_version' AND entity_id IN (SELECT id FROM kb_page_versions))
       OR (entity_type='wiki_citation' AND entity_id IN (SELECT id FROM kb_citations))
       OR (entity_type='wiki_template' AND entity_id IN (SELECT id FROM kb_templates))
-    ORDER BY created_at DESC,id DESC LIMIT 100
+      )
+      AND NOT (entity_type='task' AND entity_id IN (SELECT id FROM kb_tasks WHERE type='retrieval:embed'))
+      AND event_type NOT IN ('embedding_ready','embedding_failed')
+    ORDER BY created_at DESC,id DESC LIMIT 50
   `).all(knowledgeBaseId).map((event) => ({ ...event, metadata: parseStored(event.metadata, {}) }));
   return {
     knowledgeBaseId,

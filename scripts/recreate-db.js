@@ -19,6 +19,17 @@ const copyRows = (source, destination, table, { exclude = [] } = {}) => {
   return rows.length;
 };
 
+const backfillEmbeddingTaskRunIds = (sqlite) => {
+  const update = sqlite.prepare("UPDATE tasks SET processing_run_id=? WHERE id=? AND processing_run_id IS NULL");
+  const hasRun = sqlite.prepare("SELECT 1 FROM processing_runs WHERE id=?");
+  for (const task of sqlite.prepare("SELECT id,payload FROM tasks WHERE type='retrieval:embed' AND processing_run_id IS NULL").all()) {
+    try {
+      const processingRunId = JSON.parse(task.payload || "{}").processingRunId;
+      if (typeof processingRunId === "string" && hasRun.get(processingRunId)) update.run(processingRunId, task.id);
+    } catch {}
+  }
+};
+
 const verifySourceStorage = (sqlite, resourceStorageDir) => {
   if (!hasTable(sqlite, "resource_versions")) return { checked: 0 };
   let checked = 0;
@@ -79,6 +90,7 @@ export const rebuildDatabase = ({ target, resourceStorageDir = path.resolve("dat
       copy("chunks");
       copy("resource_fts");
       copy("tasks");
+      backfillEmbeddingTaskRunIds(destination.sqlite);
       copy("task_attempts");
       copy("audit_logs");
       copy("agent_runs");

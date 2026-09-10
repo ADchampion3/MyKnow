@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { loadConfig, redactAuditMetadata } from "@myknow/config";
-import { createDatabase, createEmbeddingProvider, ensurePendingEmbeddingTasks, ensurePendingResourceTasks, migrate, now, scanWikiImpacts } from "@myknow/db";
+import { createDatabase, createEmbeddingProvider, ensurePendingEmbeddingTasks, ensurePendingResourceTasks, migrate, now, reconcileEmbeddingRuns, scanWikiImpacts } from "@myknow/db";
 import { createMaterialReader } from "./materials.js";
 import { DefaultOcrProviderRegistry } from "./ocr/adapter.js";
 import { createResourceProcessor } from "./resources/processor.js";
@@ -26,11 +26,12 @@ const impactScan = async (task) => {
 };
 const embedRetrieval = createEmbeddingTaskProcessor({ config, sqlite, audit, provider: embeddingProvider });
 const processAgent = createAgentTaskProcessor({ config, sqlite, audit: (eventType, entityType, entityId, metadata) => audit(eventType, entityType, entityId, metadata) });
-const runner = createTaskRunner({ sqlite, workerId, audit, processResource, impactScan, embedRetrieval, processAgent });
+const runner = createTaskRunner({ sqlite, workerId, audit, embeddingConfig: config, processResource, impactScan, embedRetrieval, processAgent });
 
 runner.recoverInterruptedTasks();
 ensurePendingResourceTasks(sqlite, "startup");
 if (config.retrievalVectorEnabled !== false) ensurePendingEmbeddingTasks(sqlite, "startup", config);
+reconcileEmbeddingRuns(sqlite, { config, audit });
 
 let running = false;
 const poll = async () => {

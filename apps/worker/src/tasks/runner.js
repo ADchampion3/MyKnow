@@ -1,14 +1,21 @@
 import crypto from "node:crypto";
 import { redactSecrets } from "@myknow/config";
-import { now, refreshResourceStatus } from "@myknow/db";
+import { now, reconcileEmbeddingProgress, refreshResourceStatus } from "@myknow/db";
 
 const transientCodes = new Set(["TRANSIENT_ERROR", "SQLITE_BUSY", "WORKER_INTERRUPTED", "PROCESSING_TIMEOUT"]);
 const retryDelayMs = (attemptNumber) => attemptNumber <= 1 ? 1_000 : 5_000;
 const taskResourceVersion = (task) => task.resource_version_id || (() => { try { return JSON.parse(task.payload || "{}").resourceVersionId || null; } catch { return null; } })();
 const taskAgentRun = (task) => { try { return JSON.parse(task.payload || "{}").agentRunId || null; } catch { return null; } };
+const cancellationError = () => Object.assign(new Error("Task was cancelled"), { code: "TASK_CANCELLED" });
+const taskProcessingRun = (task) => task.processing_run_id || (() => { try { return JSON.parse(task.payload || "{}").processingRunId || null; } catch { return null; } })();
 
-export const createTaskRunner = ({ sqlite, workerId, audit, processResource, impactScan = async () => {}, embedRetrieval = async () => {}, processAgent = async () => {} }) => {
+export const createTaskRunner = ({ sqlite, workerId, audit, embeddingConfig = null, processResource, impactScan = async () => {}, embedRetrieval = async () => {}, processAgent = async () => {} }) => {
   const activeControllers = new Map();
+  const reconcileEmbeddingTask = (task) => {
+    if (task.type !== "retrieval:embed") return;
+    const processingRunId = taskProcessingRun(task);
+    if (processingRunId) reconcileEmbeddingProgress(sqlite, { processingRunId, config: embeddingConfig, audit });
+  };
   const claim = sqlite.transaction(() => {
     const timestamp = now();
     const task = sqlite.prepare("SELECT * FROM tasks WHERE cancel_requested=0 AND (status='queued' OR (status='retrying' AND (next_attempt_at IS NULL OR next_attempt_at<=?))) ORDER BY created_at,id LIMIT 1").get(timestamp);
@@ -17,15 +24,17 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
     if (!sqlite.prepare("UPDATE tasks SET status='running',worker_id=?,started_at=?,finished_at=NULL,next_attempt_at=NULL,retry_count=?,updated_at=? WHERE id=? AND status IN ('queued','retrying')").run(workerId, timestamp, nextAttempt, timestamp, task.id).changes) return null;
     const attempt = nextAttempt;
     sqlite.prepare("INSERT INTO task_attempts (id,task_id,attempt_number,status,worker_id,started_at) VALUES (?,? ,?,'running',?,?)").run(crypto.randomUUID(), task.id, attempt, workerId, timestamp);
-    audit("running", "task", task.id, { workerId, attempt });
+    if (task.type !== "retrieval:embed") audit("running", "task", task.id, { workerId, attempt });
     return { ...task, retry_count: nextAttempt, attempt };
   });
 
   const finish = sqlite.transaction((task, status, errorSummary = null, errorCode = null) => {
     const timestamp = now();
-    sqlite.prepare("UPDATE tasks SET status=?,progress=?,error_code=?,error_summary=?,finished_at=?,worker_id=NULL,updated_at=? WHERE id=?").run(status, status === "succeeded" ? 100 : 0, errorCode, errorSummary, timestamp, timestamp, task.id);
+    const updated = sqlite.prepare("UPDATE tasks SET status=?,progress=?,error_code=?,error_summary=?,finished_at=?,worker_id=NULL,updated_at=? WHERE id=? AND cancel_requested=0").run(status, status === "succeeded" ? 100 : 0, errorCode, errorSummary, timestamp, timestamp, task.id);
+    if (!updated.changes) throw cancellationError();
     sqlite.prepare("UPDATE task_attempts SET status=?,finished_at=?,error_code=?,error_summary=? WHERE task_id=? AND attempt_number=?").run(status, timestamp, errorCode, errorSummary, task.id, task.attempt);
-    audit(status, "task", task.id, { workerId, attempt: task.attempt, errorSummary, errorCode });
+    reconcileEmbeddingTask(task);
+    if (task.type !== "retrieval:embed") audit(status, "task", task.id, { workerId, attempt: task.attempt, errorSummary, errorCode });
   });
 
   const updateResourceAfterFailure = (task, timestamp, status) => {
@@ -56,7 +65,8 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
     sqlite.prepare("UPDATE task_attempts SET status='failed',finished_at=?,error_code=?,error_summary=? WHERE task_id=? AND attempt_number=?").run(timestamp, errorCode, errorSummary, task.id, task.attempt);
     updateAgentAfterFailure(task, timestamp, status, errorCode, errorSummary);
     updateResourceAfterFailure({ ...task, errorSummary, errorCode }, timestamp, status);
-    audit(status, "task", task.id, { workerId, attempt: task.attempt, errorSummary, errorCode, retryCount: task.retry_count, nextAttemptAt });
+    reconcileEmbeddingTask(task);
+    if (task.type !== "retrieval:embed") audit(status, "task", task.id, { workerId, attempt: task.attempt, errorSummary, errorCode, retryCount: task.retry_count, nextAttemptAt });
     return status;
   });
 
@@ -80,7 +90,8 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
         refreshResourceStatus(sqlite, version.resource_id, timestamp);
       }
       updateAgentAfterFailure(task, timestamp, status, errorCode, errorSummary);
-      audit(cancelled ? "cancelled" : "interrupted", "task", task.id, { workerId, retryCount, status, errorCode });
+      reconcileEmbeddingTask(task);
+      if (task.type !== "retrieval:embed") audit(cancelled ? "cancelled" : "interrupted", "task", task.id, { workerId, retryCount, status, errorCode });
     }
   });
 
@@ -88,8 +99,14 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
     const task = claim();
     if (!task) return false;
     const controller = new AbortController();
+    const cancellationRequested = () => Boolean(sqlite.prepare("SELECT cancel_requested FROM tasks WHERE id=? AND status='running'").get(task.id)?.cancel_requested);
+    // ponytail: poll the durable flag at 100ms for cross-process cancellation; replace with queue signals after worker scale makes this query material.
+    const pollCancellation = () => { if (cancellationRequested()) controller.abort(); };
     activeControllers.set(task.id, controller);
+    pollCancellation();
+    const cancelPoll = setInterval(pollCancellation, 100);
     try {
+      if (controller.signal.aborted) throw cancellationError();
       if (task.type === "resource:process") await processResource({ ...task, signal: controller.signal });
       else if (task.type === "wiki:impact-scan") await impactScan({ ...task, signal: controller.signal });
       else if (task.type === "retrieval:embed") await embedRetrieval({ ...task, signal: controller.signal });
@@ -97,15 +114,20 @@ export const createTaskRunner = ({ sqlite, workerId, audit, processResource, imp
       else if (task.type === "demo_failure") throw Object.assign(new Error("Deterministic demo failure"), { code: "PERMANENT_ERROR" });
       else if (task.type === "demo_retryable") throw Object.assign(new Error("Deterministic transient failure"), { code: "TRANSIENT_ERROR" });
       else if (task.type !== "demo_success") throw Object.assign(new Error("Unsupported task type"), { code: "PERMANENT_ERROR" });
+      if (controller.signal.aborted || cancellationRequested()) throw cancellationError();
       finish(task, "succeeded");
     } catch (caught) {
-      const errorCode = typeof caught?.code === "string" ? caught.code : "PERMANENT_ERROR";
-      const baseMessage = caught instanceof Error ? redactSecrets(caught.message) : "processing failed";
+      const cancelled = controller.signal.aborted || cancellationRequested();
+      const errorCode = cancelled ? "TASK_CANCELLED" : typeof caught?.code === "string" ? caught.code : "PERMANENT_ERROR";
+      const baseMessage = cancelled ? "Task was cancelled" : caught instanceof Error ? redactSecrets(caught.message) : "processing failed";
       const message = `${errorCode}: ${baseMessage}`;
       const status = failTask(task, message, errorCode);
-      console.error(`Task ${task.id} failed: ${message}`);
-      if (status === "retrying") console.log(`Task ${task.id} scheduled for retry ${task.retry_count}/${task.retry_limit}`);
+      if (task.type !== "retrieval:embed") {
+        console.error(`Task ${task.id} failed: ${message}`);
+        if (status === "retrying") console.log(`Task ${task.id} scheduled for retry ${task.retry_count}/${task.retry_limit}`);
+      }
     } finally {
+      clearInterval(cancelPoll);
       activeControllers.delete(task.id);
     }
     return true;

@@ -1,4 +1,5 @@
 # 当前检索机制审核
+Embedding 处理运行的进度聚合、失败明细和审计过滤约定见 [`EMBEDDING_PROGRESS.md`](EMBEDDING_PROGRESS.md)。
 
 > 状态：基于当前代码的现状文档与设计复盘，不是下一版检索协议。
 >

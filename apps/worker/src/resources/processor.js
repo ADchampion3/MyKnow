@@ -92,10 +92,12 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit,
       if (chunk.chunkType === "text") {
         insertFts.run(id, searchableText([chunk.contextHeader, chunk.content].filter(Boolean).join("\n\n")), parsed.title || fresh.title || "");
         if (config.retrievalVectorEnabled !== false) {
-          const embeddingTask = queueEmbeddingTask(sqlite, { ownerType: "raw_chunk", ownerId: id, resourceVersionId: version.id, processingRunId: runId, reason: "resource-indexed", activeTaskCache });
-          audit("queued", "task", embeddingTask.id, { type: "retrieval:embed", ownerType: "raw_chunk", ownerId: id, resourceVersionId: version.id });
+          queueEmbeddingTask(sqlite, { ownerType: "raw_chunk", ownerId: id, resourceVersionId: version.id, processingRunId: runId, reason: "resource-indexed", activeTaskCache });
         }
       }
+    }
+    if (config.retrievalVectorEnabled !== false && document.children.length) {
+      audit("embedding_queued", "processing_run", runId, { processingRunId: runId, resourceVersionId: version.id, provider: config.embeddingProvider || "mock", model: config.embeddingModel || "mock-hash-v1", dimensions: Number(config.embeddingDimensions || 32), total: document.children.length });
     }
     const outputSha256 = outputDigest(document);
     const timestamp = now();
@@ -111,6 +113,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit,
       refreshResourceStatus(sqlite, version.resource_id, timestamp);
     }
     if (previousRun) {
+      sqlite.prepare("UPDATE tasks SET cancel_requested=1,status=CASE WHEN status IN ('queued','retrying') THEN 'failed' ELSE status END,error_code=CASE WHEN status IN ('queued','retrying') THEN 'TASK_CANCELLED' ELSE error_code END,error_summary=CASE WHEN status IN ('queued','retrying') THEN 'Processing run superseded' ELSE error_summary END,finished_at=CASE WHEN status IN ('queued','retrying') THEN ? ELSE finished_at END,updated_at=? WHERE type='retrieval:embed' AND processing_run_id=? AND status IN ('queued','running','retrying')").run(timestamp, timestamp, previousRun);
       sqlite.prepare("DELETE FROM resource_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE processing_run_id=? AND chunk_type='text')").run(previousRun);
       sqlite.prepare("UPDATE chunks SET status='superseded' WHERE processing_run_id=? AND status='active'").run(previousRun);
       sqlite.prepare("UPDATE processing_runs SET status='superseded',updated_at=? WHERE id=? AND status='indexed'").run(timestamp, previousRun);

@@ -13,7 +13,12 @@ const request = async (path, options = {}) => {
 };
 
 const json = (value) => JSON.stringify(value);
-const uploadStatusText = { queued: "等待上传", uploading: "上传中", success: "已加入处理队列", error: "上传失败", invalid: "格式不支持" };
+const uploadStatusText = { queued: "等待上传", uploading: "上传中", processing: "处理中", success: "处理成功", error: "上传失败", "processing-error": "处理失败", invalid: "格式不支持" };
+const ocrModeText = { auto: "自动 OCR（失败回退原生解析）", off: "跳过 OCR（仅原生解析）", force: "强制 OCR（失败即终止）" };
+const processingRequestForMode = (mode, isPdf) => {
+  const selectedMode = isPdf && ["auto", "off", "force"].includes(mode) ? mode : "off";
+  return { ocrMode: selectedMode, ocrProvider: selectedMode === "off" ? "local" : "paddleocr" };
+};
 const supportedUploadExtensions = new Set([".md", ".txt", ".pdf"]);
 const uploadFileExtension = (name) => {
   const value = String(name || "").toLowerCase();
@@ -39,7 +44,9 @@ const retrievalLocatorPath = (item) => {
   return `${apiBase()}/api/resources/${encodeURIComponent(item.resourceId)}/versions/${encodeURIComponent(item.resourceVersionId)}/preview${query ? `?${query}` : ""}`;
 };
 const pageTypes = ["concept", "entity", "source-summary", "synthesis"];
-const statusText = { active: "正常", needs_review: "待复核", broken: "失效", indexed: "已索引", pending: "等待处理", queued: "排队中", running: "执行中", retrying: "重试中", processing: "处理中", failed: "失败", degraded: "部分可用", archived: "已归档" };
+const statusText = { active: "正常", needs_review: "待复核", broken: "失效", indexed: "已索引", pending: "等待处理", queued: "排队中", running: "执行中", retrying: "重试中", processing: "处理中", failed: "失败", degraded: "部分可用", archived: "已归档", completed: "已完成", cancelled: "已取消", disabled: "未启用", integrity_warning: "需检查", superseded: "已被替代" };
+const embeddingCountText = (progress) => progress ? `${progress.ready || 0}/${progress.total || 0}` : "-";
+const embeddingStatusText = (progress) => progress ? statusText[progress.status] || progress.status : "未开始";
 
 const flattenPages = (nodes, result = []) => {
   for (const node of nodes || []) {
@@ -122,7 +129,12 @@ export default function Page() {
   const [tags, setTags] = useState([]);
   const [runtime, setRuntime] = useState(null);
   const [resources, setResources] = useState([]);
-  const [tasks, setTasks] = useState([]);
+  const [processingRuns, setProcessingRuns] = useState([]);
+  const [embeddingDetails, setEmbeddingDetails] = useState({});
+  const [embeddingDetailLoading, setEmbeddingDetailLoading] = useState({});
+  const [embeddingActionLoading, setEmbeddingActionLoading] = useState({});
+  const [expandedProcessingRunId, setExpandedProcessingRunId] = useState(null);
+  const [showHistoricalRuns, setShowHistoricalRuns] = useState(false);
   const [impacts, setImpacts] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
   const [retrieval, setRetrieval] = useState(null);
@@ -163,11 +175,20 @@ export default function Page() {
   const [uploadQueue, setUploadQueue] = useState([]);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadDropActive, setUploadDropActive] = useState(false);
+  const [uploadOcrMode, setUploadOcrMode] = useState("auto");
 
   const allPages = useMemo(() => flattenPages(wiki?.pages), [wiki]);
-  const resourceVersionIds = useMemo(() => new Set(resources.flatMap((resource) => (resource.versions || []).map((version) => version.id))), [resources]);
   const treeSourceCount = selectedResourceVersionIds.length + selectedWikiPageIds.length;
-  const visibleTasks = useMemo(() => tasks.filter((task) => resourceVersionIds.has(task.resourceVersionId || task.resource_version_id)).slice(0, 8), [resourceVersionIds, tasks]);
+  const currentProcessingRuns = useMemo(() => {
+    const seenResources = new Set();
+    return processingRuns.filter((run) => {
+      const resourceKey = run.resourceId || run.resourceVersionId || run.id;
+      if (seenResources.has(resourceKey)) return false;
+      seenResources.add(resourceKey);
+      return true;
+    });
+  }, [processingRuns]);
+  const displayedProcessingRuns = showHistoricalRuns ? processingRuns : currentProcessingRuns;
   const ordinaryPages = useMemo(() => allPages.filter((item) => !item.system), [allPages]);
   const filteredResources = useMemo(() => resources.filter((resource) => {
     const matchesText = !resourceFilter.trim() || resource.name.toLowerCase().includes(resourceFilter.trim().toLowerCase());
@@ -176,8 +197,9 @@ export default function Page() {
   }), [resources, resourceFilter, resourceStatusFilter]);
   const reviewCount = impacts.length + agentPlan.filter((item) => item.reviewStatus === "proposed" && item.applicationStatus === "pending").length;
   const actionableUploadCount = uploadQueue.filter((item) => ["queued", "error"].includes(item.status)).length;
-  const uploadSuccessCount = uploadQueue.filter((item) => item.status === "success").length;
-  const uploadFailureCount = uploadQueue.filter((item) => ["error", "invalid"].includes(item.status)).length;
+  const uploadProcessingCount = uploadQueue.filter((item) => item.status === "processing").length;
+  const uploadCompletedCount = uploadQueue.filter((item) => ["success", "error", "processing-error", "invalid"].includes(item.status)).length;
+  const uploadFailureCount = uploadQueue.filter((item) => ["error", "processing-error", "invalid"].includes(item.status)).length;
 
   useEffect(() => {
     const available = new Set(resources.map((resource) => resource.currentVersion?.id).filter(Boolean));
@@ -199,26 +221,111 @@ export default function Page() {
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
 
+  const reconcileUploadQueue = (resourceRows) => {
+    const byResourceId = new Map((resourceRows || []).map((resource) => [resource.id, resource]));
+    setUploadQueue((current) => {
+      let changed = false;
+      const next = current.map((item) => {
+        if (item.status !== "processing" || !item.resourceId) return item;
+        const resource = byResourceId.get(item.resourceId);
+        if (!resource) return item;
+        const version = (resource.versions || []).find((candidate) => candidate.id === item.versionId) || resource.latestVersion;
+        const task = resource.task?.id === item.taskId ? resource.task : null;
+        if (task?.status === "failed" || task?.status === "cancelled" || version?.status === "failed") {
+          changed = true;
+          return { ...item, status: "processing-error", error: task?.error_summary || task?.errorSummary || version?.error_summary || version?.errorSummary || "原材料处理失败" };
+        }
+        if (version?.status === "superseded") {
+          changed = true;
+          return { ...item, status: "processing-error", error: "该版本已被更新版本替代" };
+        }
+        if (version?.status === "indexed" && (!task || task.status === "succeeded")) {
+          changed = true;
+          return { ...item, status: "success", error: "" };
+        }
+        return item;
+      });
+      return changed ? next : current;
+    });
+  };
+
   const loadWorkspace = async (knowledgeBaseId = selected?.id) => {
-    if (!knowledgeBaseId) { setWiki(null); setSpaces([]); setTags([]); setResources([]); setTasks([]); setImpacts([]); setLoading(false); return; }
+    if (!knowledgeBaseId) { setWiki(null); setSpaces([]); setTags([]); setResources([]); setProcessingRuns([]); setEmbeddingDetails({}); setEmbeddingDetailLoading({}); setExpandedProcessingRunId(null); setShowHistoricalRuns(false); setImpacts([]); setLoading(false); return; }
     try {
-      const [wikiBody, spaceBody, tagBody, resourceBody, taskBody, impactBody] = await Promise.all([
+      const [wikiBody, spaceBody, tagBody, resourceBody, processingRunBody, impactBody] = await Promise.all([
         request(`/api/knowledge-bases/${knowledgeBaseId}/wiki`),
         request(`/api/knowledge-bases/${knowledgeBaseId}/spaces`),
         request(`/api/knowledge-bases/${knowledgeBaseId}/tags`),
         request(`/api/resources?knowledgeBaseId=${encodeURIComponent(knowledgeBaseId)}`),
-        request("/api/tasks"),
+        request(`/api/knowledge-bases/${knowledgeBaseId}/processing-runs?limit=50`),
         request(`/api/knowledge-bases/${knowledgeBaseId}/wiki/impacts`)
       ]);
       setWiki(wikiBody.data);
       setSpaces(spaceBody.data || []);
       setTags(tagBody.data || []);
-      setResources(resourceBody.data || []);
-      setTasks(taskBody.data || []);
+      const resourceRows = resourceBody.data || [];
+      setResources(resourceRows);
+      reconcileUploadQueue(resourceRows);
+      setProcessingRuns(processingRunBody.data?.items || []);
       setImpacts(impactBody.data?.items || []);
       setError("");
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
     finally { setLoading(false); }
+  };
+
+  const loadEmbeddingDetails = async (run, filterStatus = "failed", page = 1, append = false) => {
+    if (!run?.resourceId || !run?.id) return;
+    const filter = filterStatus === "all" ? null : filterStatus;
+    const key = `${run.id}:${filter || "all"}`;
+    setEmbeddingDetailLoading((current) => ({ ...current, [key]: true }));
+    try {
+      const query = new URLSearchParams({ page: String(page), limit: "20" });
+      if (filter) query.set("status", filter);
+      const body = await request(`/api/resources/${encodeURIComponent(run.resourceId)}/processing-runs/${encodeURIComponent(run.id)}/embedding-tasks?${query}`);
+      setEmbeddingDetails((current) => {
+        const next = { ...current };
+        const previous = append ? current[key] : null;
+        next[key] = { ...body.data, items: append ? [...(previous?.items || []), ...(body.data.items || [])] : body.data.items || [], filterStatus: filter || "all" };
+        if (filter === "failed") delete next[`${run.id}:all`];
+        return next;
+      });
+      setExpandedProcessingRunId(run.id);
+    } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
+    finally { setEmbeddingDetailLoading((current) => ({ ...current, [key]: false })); }
+  };
+
+  const retryEmbeddingTask = async (run, item) => {
+    if (!item?.taskId) return;
+    try {
+      await request(`/api/tasks/${encodeURIComponent(item.taskId)}/retry`, { method: "POST", body: "{}" });
+      setMessage("已重新加入向量处理队列");
+      await loadWorkspace(selected?.id);
+      await loadEmbeddingDetails(run, "failed");
+    } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
+  };
+
+  const controlEmbeddingRun = async (run, action) => {
+    if (!run?.resourceId || !run?.id) return;
+    const key = `${run.id}:${action}`;
+    setEmbeddingActionLoading((current) => ({ ...current, [key]: true }));
+    try {
+      const body = await request(`/api/resources/${encodeURIComponent(run.resourceId)}/processing-runs/${encodeURIComponent(run.id)}/${action}`, { method: "POST", body: json({}) });
+      await loadWorkspace(selected?.id);
+      await loadEmbeddingDetails(run, action === "retry" ? "failed" : "all");
+      const result = body.data || {};
+      if (action === "retry") setMessage(result.queued ? `已将 ${result.queued} 个异常 chunk 重新加入 embedding 队列` : "当前没有可重试的 embedding 异常项");
+      else setMessage(`已请求取消 ${result.requested || 0} 个 embedding task${result.running ? `，${result.running} 个运行中任务正在停止` : ""}`);
+    } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
+    finally { setEmbeddingActionLoading((current) => ({ ...current, [key]: false })); }
+  };
+
+  const cancelTask = async (task) => {
+    if (!task?.id || !["queued", "running", "retrying"].includes(task.status)) return;
+    try {
+      const body = await request(`/api/tasks/${encodeURIComponent(task.id)}/cancel`, { method: "POST", body: json({}) });
+      await loadWorkspace(selected?.id);
+      setMessage(body.data?.status === "failed" ? "任务已取消" : "已请求取消任务，worker 会在安全边界停止");
+    } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
 
   const loadPage = async (pageId) => {
@@ -255,6 +362,7 @@ export default function Page() {
     return () => { active = false; clearInterval(timer); };
   }, []);
   useEffect(() => {
+    setShowHistoricalRuns(false);
     loadWorkspace(selected?.id);
     // ponytail: five-second polling is the local MVP ceiling; upgrade to server-sent updates when multi-user task freshness matters.
     const timer = selected?.id ? setInterval(() => loadWorkspace(selected.id), 5000) : null;
@@ -433,7 +541,7 @@ export default function Page() {
       if (incomingKeys.has(fileKey)) return result;
       incomingKeys.add(fileKey);
       const valid = isSupportedUploadFile(file);
-      result.push({ id: createUploadId(), idempotencyKey: createUploadId(), file, fileKey, status: valid ? "queued" : "invalid", error: valid ? "" : "仅支持 Markdown、TXT 和 PDF 文件" });
+      result.push({ id: createUploadId(), idempotencyKey: createUploadId(), file, fileKey, status: valid ? "queued" : "invalid", resourceId: null, versionId: null, taskId: null, error: valid ? "" : "仅支持 Markdown、TXT 和 PDF 文件" });
       return result;
     }, []);
     setUploadQueue((current) => {
@@ -475,7 +583,7 @@ export default function Page() {
     setUploadBusy(true);
     setError("");
     setMessage("");
-    let succeeded = 0;
+    let submitted = 0;
     let failed = 0;
     // ponytail: uploads stay sequential to keep the local API/SQLite worker predictable; upgrade to bounded parallelism when large batches need throughput.
     for (const item of pendingItems) {
@@ -485,12 +593,13 @@ export default function Page() {
       payload.set("knowledgeBaseId", selected.id);
       payload.set("file", item.file);
       const isPdf = item.file.type === "application/pdf" || item.file.name.toLowerCase().endsWith(".pdf");
-      payload.set("ocrMode", isPdf ? "auto" : "off");
-      payload.set("ocrProvider", isPdf ? "paddleocr" : "local");
+      const processingRequest = processingRequestForMode(uploadOcrMode, isPdf);
+      payload.set("ocrMode", processingRequest.ocrMode);
+      payload.set("ocrProvider", processingRequest.ocrProvider);
       try {
-        await request("/api/resources", { method: "POST", body: payload, headers: { "idempotency-key": item.idempotencyKey } });
-        succeeded += 1;
-        setUploadQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "success", error: "" } : candidate));
+        const body = await request("/api/resources", { method: "POST", body: payload, headers: { "idempotency-key": item.idempotencyKey } });
+        submitted += 1;
+        setUploadQueue((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "processing", resourceId: body.data?.resource?.id || null, versionId: body.data?.version?.id || null, taskId: body.data?.task?.id || null, ocrMode: processingRequest.ocrMode, error: "" } : candidate));
       } catch (caught) {
         failed += 1;
         const uploadError = `${caught.code || "NETWORK_ERROR"}: ${caught.message || "上传失败"}`;
@@ -499,24 +608,25 @@ export default function Page() {
     }
     await loadWorkspace(selected.id);
     setUploadBusy(false);
-    if (failed) setError(`${failed} 个文件上传失败，请检查列表后重试${succeeded ? `；${succeeded} 个文件已成功加入处理队列` : ""}`);
-    else setMessage(`${succeeded} 个文件已加入处理队列，原始文件保持只读`);
+    if (failed) setError(`${failed} 个文件提交失败，请检查列表后重试${submitted ? `；${submitted} 个文件已进入处理，结果会显示在文件清单中` : ""}`);
+    else setMessage(`${submitted} 个文件已进入处理队列，文件清单会反馈处理成功或失败`);
   };
 
   const appendResourceVersion = async (event, resource) => {
     const file = event.currentTarget.files[0];
     if (!file) return;
     const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    const processingRequest = processingRequestForMode(uploadOcrMode, isPdf);
     const payload = new FormData();
     payload.set("name", resource.name);
     payload.set("file", file);
-    payload.set("ocrMode", isPdf ? "auto" : "off");
-    payload.set("ocrProvider", isPdf ? "paddleocr" : "local");
+    payload.set("ocrMode", processingRequest.ocrMode);
+    payload.set("ocrProvider", processingRequest.ocrProvider);
     try {
       await request(`/api/resources/${resource.id}/versions`, { method: "POST", body: payload });
       event.currentTarget.value = "";
       await loadWorkspace(selected.id);
-      setMessage("资源已追加为新的不可变版本");
+      setMessage(`资源已提交新版本（${ocrModeText[processingRequest.ocrMode]}），处理结果会显示在资源状态中`);
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
 
@@ -524,10 +634,11 @@ export default function Page() {
     const version = resource.currentVersion;
     if (!version) return;
     const isPdf = version.mime_type === "application/pdf";
+    const processingRequest = processingRequestForMode(uploadOcrMode, isPdf);
     try {
-      await request(`/api/resources/${resource.id}/reprocess`, { method: "POST", body: json({ versionId: version.id, ocrMode: isPdf ? "force" : "off", ocrProvider: isPdf ? "paddleocr" : "local", ...(isPdf ? { refreshOcr: true } : {}) }) });
+      await request(`/api/resources/${resource.id}/reprocess`, { method: "POST", body: json({ versionId: version.id, ...processingRequest, ...(isPdf && processingRequest.ocrMode === "force" ? { refreshOcr: true } : {}) }) });
       await loadWorkspace(selected.id);
-      setMessage("已提交显式重处理");
+      setMessage(`已提交显式重处理（${ocrModeText[processingRequest.ocrMode]}），处理结果会显示在资源状态中`);
     } catch (caught) { setError(`${caught.code}: ${caught.message}`); }
   };
 
@@ -866,7 +977,7 @@ export default function Page() {
       <div className="stat"><span className="stat-num">{wiki?.pageCount || ordinaryPages.length}</span><span className="stat-label">Wiki 页面</span></div>
       <div className="stat"><span className="stat-num">{resources.length}</span><span className="stat-label">原始资料</span></div>
       <div className="stat"><span className="stat-num">{impacts.length}</span><span className="stat-label">需要关注</span></div>
-      <div className="stat"><span className="stat-num">{tasks.length}</span><span className="stat-label">处理任务</span></div>
+      <div className="stat"><span className="stat-num">{currentProcessingRuns.length}</span><span className="stat-label">处理运行</span></div>
     </section>
 
     <div className="overview-columns">
@@ -923,18 +1034,24 @@ export default function Page() {
         <div>
           <span className="eyebrow">BATCH IMPORT</span>
           <h2 id="upload-title">添加原始资料</h2>
-          <p>一次选择多个文件，系统会逐个加入处理队列；原始文件始终保留为只读版本。</p>
+          <p>一次选择多个文件，系统会逐个加入处理队列；原始文件始终保留为只读版本。提交后会持续反馈原材料处理结果。</p>
         </div>
         <div className="upload-summary" aria-live="polite">
-          {uploadQueue.length ? <><strong>{uploadSuccessCount}/{uploadQueue.length}</strong><span>已处理{uploadFailureCount ? ` · ${uploadFailureCount} 项需处理` : ""}</span></> : <span>支持 MD、TXT、PDF</span>}
+          {uploadQueue.length ? <><strong>{uploadCompletedCount}/{uploadQueue.length}</strong><span>{uploadProcessingCount ? `处理中 ${uploadProcessingCount} 项` : actionableUploadCount ? `待提交 ${actionableUploadCount} 项` : uploadFailureCount ? `失败 ${uploadFailureCount} 项` : "全部处理成功"}</span></> : <span>支持 MD、TXT、PDF</span>}
         </div>
       </div>
       <form className="upload-form" onSubmit={importResource}>
-        <label className={"upload-dropzone" + (uploadDropActive ? " active" : "") + (uploadBusy ? " disabled" : "")} onDragOver={(event) => { event.preventDefault(); if (!uploadBusy) setUploadDropActive(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setUploadDropActive(false); }} onDrop={handleUploadDrop}>
-          <input name="file" type="file" accept=".md,.txt,.pdf" multiple disabled={uploadBusy} onChange={handleUploadInput} aria-label="选择要导入的资料，可多选" />
-          <span className="upload-drop-icon"><Icon name="upload" size={22} /></span>
-          <span><strong>拖拽文件到这里</strong><small>或点击选择，可一次添加多个文件</small></span>
-        </label>
+        <div className="upload-inputs">
+          <label className={"upload-dropzone" + (uploadDropActive ? " active" : "") + (uploadBusy ? " disabled" : "")} onDragOver={(event) => { event.preventDefault(); if (!uploadBusy) setUploadDropActive(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setUploadDropActive(false); }} onDrop={handleUploadDrop}>
+            <input name="file" type="file" accept=".md,.txt,.pdf" multiple disabled={uploadBusy} onChange={handleUploadInput} aria-label="选择要导入的资料，可多选" />
+            <span className="upload-drop-icon"><Icon name="upload" size={22} /></span>
+            <span><strong>拖拽文件到这里</strong><small>或点击选择，可一次添加多个文件</small></span>
+          </label>
+          <div className="upload-options">
+            <label htmlFor="upload-ocr-mode"><strong>PDF 处理方式（上传、追加、重处理）</strong><select id="upload-ocr-mode" value={uploadOcrMode} onChange={(event) => setUploadOcrMode(event.target.value)} disabled={uploadBusy} aria-describedby="upload-ocr-mode-help"><option value="auto">自动 OCR（推荐）</option><option value="off">跳过 OCR，仅使用原生解析</option><option value="force">强制 OCR（失败即终止）</option></select></label>
+            <small id="upload-ocr-mode-help">仅对 PDF 生效；Markdown/TXT 始终使用原生解析。自动 OCR 失败会回退，强制 OCR 失败会标记处理失败。</small>
+          </div>
+        </div>
         <div className="upload-actions">
           <button className="btn btn-primary" type="submit" disabled={uploadBusy || !actionableUploadCount}><Icon name="upload" size={17} />{uploadBusy ? "上传中…" : actionableUploadCount ? `上传 ${actionableUploadCount} 个文件` : "开始上传"}</button>
           {uploadQueue.length > 0 && <button className="btn btn-ghost" type="button" onClick={clearUploadQueue} disabled={uploadBusy}>清空列表</button>}
@@ -945,7 +1062,7 @@ export default function Page() {
         <ul>
           {uploadQueue.map((item) => <li className={"upload-item " + item.status} key={item.id}>
             <span className="upload-file-type">{uploadFileExtension(item.file.name).slice(1).toUpperCase() || "FILE"}</span>
-            <div className="upload-file-info"><strong title={item.file.name}>{item.file.name}</strong><small>{formatFileSize(item.file.size)} · {uploadFileExtension(item.file.name).slice(1).toUpperCase() || "未知类型"}</small>{item.error && <span className="upload-item-error" role="alert">{item.error}</span>}</div>
+            <div className="upload-file-info"><strong title={item.file.name}>{item.file.name}</strong><small>{formatFileSize(item.file.size)} · {uploadFileExtension(item.file.name).slice(1).toUpperCase() || "未知类型"}{item.ocrMode && uploadFileExtension(item.file.name) === ".pdf" ? ` · ${ocrModeText[item.ocrMode]}` : ""}</small>{item.error && <span className="upload-item-error" role="alert">{item.error}</span>}</div>
             <span className="upload-item-state"><span className="upload-status-dot" aria-hidden="true" />{uploadStatusText[item.status] || item.status}</span>
             <button className="icon-btn upload-remove" type="button" onClick={() => removeUploadItem(item.id)} disabled={uploadBusy} aria-label={`移除 ${item.file.name}`} title="移除文件"><Icon name="close" size={17} /></button>
           </li>)}
@@ -959,9 +1076,9 @@ export default function Page() {
         <tbody>
           {filteredResources.map((resource) => <tr key={resource.id}>
             <td data-label="资料"><div className="file-title"><Icon name="file" size={19} /><span><button className="table-link" type="button" onClick={() => openResource(resource)}>{resource.name}</button><span className="table-meta">{resource.mimeType || resource.mime_type || "原始资料"}</span></span></div></td>
-            <td data-label="状态 / 版本"><div>{statusLabel(resource.status)}</div><span className="table-meta">{resource.currentVersion?.id ? "v" + resource.versions.length : "尚未索引"}</span></td>
+            <td data-label="状态 / 版本"><div>{statusLabel(resource.status)}{resource.task?.status && <span className={"status-tag resource-processing-status " + resource.task.status}>处理：{resource.task.status === "succeeded" ? "成功" : statusText[resource.task.status] || resource.task.status}</span>}</div><span className="table-meta">{resource.currentVersion?.id ? "v" + resource.versions.length : "尚未索引"}</span>{resource.latestVersion?.mime_type === "application/pdf" && resource.latestVersion.processingRequest && <span className="table-meta">PDF：{ocrModeText[resource.latestVersion.processingRequest.mode] || resource.latestVersion.processingRequest.mode}</span>}{resource.task?.error_summary && <span className="table-meta resource-error" role="alert">{resource.task.error_summary}</span>}{resource.embeddingProgress && <span className="table-meta">Embedding {embeddingCountText(resource.embeddingProgress)} · {embeddingStatusText(resource.embeddingProgress)}</span>}</td>
             <td data-label="Wiki 策略" className="resource-strategy"><select className="strategy-select" value={resource.wikiMode || "inherit"} onChange={(event) => setResourceMode(resource, event.target.value)} aria-label={resource.name + " 的 Wiki 策略"}><option value="inherit">继承知识库</option><option value="enabled">参与 Wiki</option><option value="retrieval-only">仅检索</option></select></td>
-            <td data-label="操作"><div className="resource-actions"><button className="btn btn-secondary" type="button" onClick={() => openResource(resource)}>详情</button><label className="btn btn-secondary">追加版本<input type="file" accept=".md,.txt,.pdf" onChange={(event) => appendResourceVersion(event, resource)} /></label><button className="btn btn-secondary" type="button" disabled={!resource.currentVersion} onClick={() => reprocessResource(resource)}>重处理</button><button className="btn btn-secondary" type="button" disabled={!resource.currentVersion} onClick={() => retryResource(resource)}>重试</button></div></td>
+            <td data-label="操作"><div className="resource-actions"><button className="btn btn-secondary" type="button" onClick={() => openResource(resource)}>详情</button><label className="btn btn-secondary">追加版本<input type="file" accept=".md,.txt,.pdf" onChange={(event) => appendResourceVersion(event, resource)} /></label><button className="btn btn-secondary" type="button" disabled={!resource.currentVersion} onClick={() => reprocessResource(resource)}>重处理</button><button className="btn btn-secondary" type="button" disabled={!resource.currentVersion} onClick={() => retryResource(resource)}>重试</button>{["queued", "running", "retrying"].includes(resource.task?.status) && <button className="btn btn-secondary" type="button" onClick={() => cancelTask(resource.task)}>取消处理</button>}</div></td>
           </tr>)}
         </tbody>
       </table>
@@ -1144,9 +1261,25 @@ export default function Page() {
   </div>;
 
   const renderTasks = () => <div className="view-stack">
-    <header className="page-head"><div><span className="eyebrow">OPERATIONS / HISTORY</span><h1>任务与记录</h1><p>处理进度、失败原因和审计事件逐步展开，原始资料和历史版本不会因为派生任务失败而丢失。</p></div><button className="btn btn-secondary" type="button" onClick={() => loadWorkspace(selected?.id)}><Icon name="refresh" size={17} />刷新状态</button></header>
-    <section className="section-block"><div className="section-lead"><div><h2>处理任务</h2><p>真实任务状态来自服务端，失败时可回到资料库重试。</p></div><span className="meta">{tasks.length}</span></div><div className="task-list">{tasks.length ? tasks.map((task) => <div className="task-row" key={task.id}><div><b>{task.type}</b><small>{statusText[task.status] || task.status}{task.errorSummary ? " · " + task.errorSummary : ""}</small></div><div className="task-progress"><div className="progress-track"><span style={{ width: Math.max(0, Math.min(100, task.progress ?? 0)) + "%" }} /></div><span>{task.progress ?? 0}%</span></div></div>) : <div className="empty">暂无处理任务。</div>}</div></section>
-    <section className="section-block"><div className="section-lead"><div><h2>审计记录</h2><p>页面、版本、引用和影响扫描都保留可追溯记录。</p></div><span className="meta">{(wiki?.log?.events || []).length}</span></div><div className="log-table">{(wiki?.log?.events || []).map((event) => <div className="log-row" key={event.id}><time>{new Date(event.created_at).toLocaleString()}</time><b>{event.event_type}</b><span>{event.entity_type} / {event.entity_id.slice(0, 8)}</span><small>{JSON.stringify(event.metadata || {})}</small></div>)}{!wiki?.log?.events?.length && <div className="empty">暂无审计事件。</div>}</div></section>
+    <header className="page-head"><div><span className="eyebrow">OPERATIONS / HISTORY</span><h1>任务与记录</h1><p>按资源处理运行查看解析、分块和向量进度；成功项默认折叠，失败项保留可重试和可溯源细节。</p></div><button className="btn btn-secondary" type="button" onClick={() => loadWorkspace(selected?.id)}><Icon name="refresh" size={17} />刷新状态</button></header>
+    <section className="section-block"><div className="section-lead"><div><h2>处理运行</h2><p>Embedding 进度按 processing run 聚合，不再把每个 chunk 的成功事件铺满页面。</p></div><div className="inline-actions"><span className="meta">{displayedProcessingRuns.length} / {processingRuns.length}</span>{processingRuns.length > currentProcessingRuns.length && <button className="btn btn-ghost" type="button" onClick={() => setShowHistoricalRuns((visible) => !visible)}>{showHistoricalRuns ? "仅显示当前运行" : `查看历史运行 (${processingRuns.length - currentProcessingRuns.length})`}</button>}</div></div><div className="run-list">{displayedProcessingRuns.length ? displayedProcessingRuns.map((run) => {
+      const progress = run.embeddingProgress;
+      const isExpanded = expandedProcessingRunId === run.id;
+      const detail = embeddingDetails[`${run.id}:all`] || embeddingDetails[`${run.id}:failed`];
+      const detailKey = `${run.id}:${detail?.filterStatus || "failed"}`;
+      const detailLoading = embeddingDetailLoading[detailKey] || embeddingDetailLoading[`${run.id}:all`] || embeddingDetailLoading[`${run.id}:failed`];
+      const retryableCount = (progress?.failed || 0) + (progress?.cancelled || 0) + (progress?.missing || 0);
+      const cancelBusy = embeddingActionLoading[`${run.id}:cancel`];
+      const retryBusy = embeddingActionLoading[`${run.id}:retry`];
+      return <article className="run-row" key={run.id}>
+        <div className="run-row-head"><div><b>{run.resourceName || "未命名资源"}</b><small>run {run.id.slice(0, 8)} · version {(run.resourceVersionId || "").slice(0, 8)} · {new Date(run.createdAt).toLocaleString()}</small></div>{statusLabel(progress?.status || run.status)}</div>
+        <div className="run-summary"><div className="run-progress-line"><span>Embedding</span><strong>{embeddingCountText(progress)}</strong><span>{embeddingStatusText(progress)}</span></div><div className="progress-track"><span style={{ width: `${Math.max(0, Math.min(100, progress?.progressPercent || 0))}%` }} /></div><div className="run-metrics"><span>待处理 {progress?.pending || 0}</span><span>失败 {progress?.failed || 0}</span><span>取消 {progress?.cancelled || 0}</span><span>缺失 {progress?.missing || 0}</span><span>{progress?.provider || "-"} / {progress?.model || "-"}</span></div></div>
+        {progress?.errorGroups?.length > 0 && <div className="run-error-groups">{progress.errorGroups.slice(0, 5).map((group) => <span key={`${group.errorCode}-${group.provider}-${group.model}`}>{group.errorCode} × {group.count}</span>)}</div>}
+        <div className="inline-actions"><button className="btn btn-ghost" type="button" onClick={() => { setExpandedProcessingRunId(isExpanded ? null : run.id); if (!isExpanded && !detail) loadEmbeddingDetails(run, "failed"); }}>{isExpanded ? "收起明细" : "查看失败项"}</button>{isExpanded && <button className="btn btn-ghost" type="button" onClick={() => loadEmbeddingDetails(run, null)}>查看全部</button>}{progress?.pending > 0 && run.status !== "superseded" && <button className="btn btn-secondary" type="button" disabled={cancelBusy || retryBusy} onClick={() => controlEmbeddingRun(run, "cancel")}>{cancelBusy ? "取消中…" : `取消剩余任务 (${progress.pending})`}</button>}{retryableCount > 0 && run.status !== "superseded" && <button className="btn btn-secondary" type="button" disabled={cancelBusy || retryBusy} onClick={() => controlEmbeddingRun(run, "retry")}>{retryBusy ? "重试中…" : `一键重试异常项 (${retryableCount})`}</button>}</div>
+        {isExpanded && <div className="run-detail">{detailLoading && <div className="muted">正在加载明细…</div>}{detail && !detailLoading && <>{detail.items?.length ? detail.items.map((item) => <div className="run-detail-row" key={item.chunkId}><div><b>#{item.sequence} · {statusText[item.status] || item.status}</b><small>{item.errorCode || `${item.provider} / ${item.model}`} · chunk {item.chunkId.slice(0, 8)} · retry {item.retryCount}/{item.retryLimit}</small>{item.errorSummary && <small>{item.errorSummary}</small>}</div>{["failed", "cancelled"].includes(item.status) && item.taskId && <button className="btn btn-secondary" type="button" onClick={() => retryEmbeddingTask(run, item)}>重试</button>}</div>) : <div className="empty">当前筛选没有明细项。</div>}{detail.total > detail.items.length && <><small className="muted">当前显示 {detail.items.length} / {detail.total} 项。</small><button className="btn btn-ghost" type="button" onClick={() => loadEmbeddingDetails(run, detail.filterStatus === "all" ? null : detail.filterStatus, Math.floor(detail.items.length / 20) + 1, true)}>加载下一页</button></>}</>}{!detail && !detailLoading && <div className="empty">暂无可显示的明细。</div>}</div>}
+      </article>;
+    }) : <div className="empty">暂无处理运行。</div>}</div></section>
+    <section className="section-block"><div className="section-lead"><div><h2>系统事件</h2><p>默认只展示高层生命周期事件；逐项失败和重试请从上面的运行明细进入。</p></div><span className="meta">{(wiki?.log?.events || []).length}</span></div><div className="log-table">{(wiki?.log?.events || []).map((event) => <div className="log-row" key={event.id}><time>{new Date(event.created_at).toLocaleString()}</time><b>{event.event_type}</b><span>{event.entity_type} / {event.entity_id.slice(0, 8)}</span><small>{JSON.stringify(event.metadata || {})}</small></div>)}{!wiki?.log?.events?.length && <div className="empty">暂无系统事件。</div>}</div></section>
   </div>;
 
   const currentNav = navItems.find((item) => item.id === (view === "log" ? "tasks" : view)) || navItems[0];
@@ -1164,7 +1297,7 @@ export default function Page() {
         <nav aria-label="工作区模块">
           <p className="nav-label">工作区</p>
           <div className="nav-list">{navItems.map((item) => {
-            const count = item.id === "resources" ? resources.length : item.id === "wiki" ? ordinaryPages.length : item.id === "review" ? reviewCount : item.id === "tasks" ? tasks.length : null;
+            const count = item.id === "resources" ? resources.length : item.id === "wiki" ? ordinaryPages.length : item.id === "review" ? reviewCount : item.id === "tasks" ? currentProcessingRuns.length : null;
             return <button className={"nav-link " + (view === item.id ? "active" : "")} type="button" key={item.id} aria-current={view === item.id ? "page" : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{count !== null && <span className="count">{count}</span>}</button>;
           })}</div>
         </nav>

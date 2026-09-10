@@ -33,10 +33,8 @@ export const createEmbeddingTaskProcessor = ({ config, sqlite, audit, provider: 
         validateEmbeddingVector(result.vector, provider.dimensions);
       }
       persistEmbedding(sqlite, { ownerType, ownerId, pageVersionId: pageVersionId || null, resourceVersionId: resourceVersionId || null, processingRunId: processingRunId || null, provider: result.provider, model: result.model, inputSha256, vector: result.vector });
-      audit("embedding_ready", "retrieval_embedding", `${ownerType}:${ownerId}`, { ownerType, ownerId, versionKey: pageVersionId || resourceVersionId, provider: result.provider, model: result.model, dimensions: result.dimensions, durationMs: result.durationMs, cacheHit, providerCallCount: cacheHit ? 0 : 1, inputSha256 });
     } catch (caught) {
       persistEmbedding(sqlite, { ownerType, ownerId, pageVersionId: pageVersionId || null, resourceVersionId: resourceVersionId || null, processingRunId: processingRunId || null, provider: provider.provider, model: provider.model, inputSha256, errorCode: caught.code || "EMBEDDING_FAILED", errorSummary: caught.message || "embedding provider failed" });
-      audit("embedding_failed", "retrieval_embedding", `${ownerType}:${ownerId}`, { ownerType, ownerId, versionKey: pageVersionId || resourceVersionId, provider: provider.provider, model: provider.model, errorCode: caught.code || "EMBEDDING_FAILED", inputSha256 });
       throw caught;
     }
   };

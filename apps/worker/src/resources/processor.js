@@ -19,7 +19,7 @@ export const createResourceProcessor = ({ config, sqlite, materialReader, audit,
     const runId = crypto.randomUUID();
     const timestamp = now();
     sqlite.transaction(() => {
-      sqlite.prepare("INSERT INTO processing_runs (id,resource_version_id,status,chunker_name,chunker_version,chunking_config,input_sha256,requested_ocr_mode,requested_ocr_provider,capabilities,created_at,updated_at) VALUES (?,?, 'processing', 'weknora-adaptive', '5', ?, ?, ?, ?, ?, ?, ?)").run(runId, version.id, JSON.stringify(chunkingConfig), version.content_sha256, processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), timestamp, timestamp);
+      sqlite.prepare("INSERT INTO processing_runs (id,resource_version_id,status,chunker_name,chunker_version,chunking_config,input_sha256,requested_ocr_mode,requested_ocr_provider,capabilities,created_at,updated_at) VALUES (?,?, 'processing', 'weknora-adaptive', '6', ?, ?, ?, ?, ?, ?, ?)").run(runId, version.id, JSON.stringify(chunkingConfig), version.content_sha256, processingRequest.mode, processingRequest.provider, JSON.stringify(processingRequest.capabilities), timestamp, timestamp);
       sqlite.prepare("UPDATE resource_versions SET status='processing',error_summary=NULL,updated_at=? WHERE id=?").run(timestamp, version.id);
       refreshResourceStatus(sqlite, version.resource_id, timestamp);
     })();

@@ -989,10 +989,11 @@ export const chunkDocument = (text, rawConfig = {}, runtime = {}) => {
       splitReason: [...new Set([parent.protectedType ? parent.splitReason : null, child.splitReason].filter(Boolean))].join(",") || null
     }));
     if (config.childTokenTarget) localChildren = localChildren.flatMap((child) => splitChunkByTokenTarget(points, child, config.childTokenTarget, tokenizer, child.contextHeader || ""));
+    localChildren = localChildren.filter((child) => child.content.trim() || child.contextHeader?.trim());
     const singleChild = localChildren.length === 1 && localChildren[0].content === parent.content && localChildren[0].start === parent.start && localChildren[0].end === parent.end;
     const retainProtectedParent = Boolean(parent.protectedType && (codePointLength(parent.content) > config.childChunkSize || parent.partCount > 1));
     let parentId = null;
-    if (!singleChild || retainProtectedParent) {
+    if (localChildren.length && (!singleChild || retainProtectedParent)) {
       parentId = `parent:${parentIndex}`;
       parents.push({ ...parent, sequence: sequence++, parentIndex, id: parentId, chunkType: "parent_text" });
     }

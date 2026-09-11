@@ -83,7 +83,7 @@ size      -> 正文与 embedding 输入的 code point、byte、estimated token
 
 配置会在 API 创建资源版本时从知识库配置快照下来，Worker 再次规范化后执行。处理记录也会保存配置；因此同一资源的不同版本或不同 processing run 可以使用不同分块参数。
 
-当前结构保护、公式拆分、尺寸度量、canonical metadata、parser block 输入与 provider token 目标对应 `chunker_version=5`。已有 chunks、FTS 和 embedding 属于旧 processing run 时，应随资源重新处理后再使用新的结构元数据。
+当前结构保护、公式拆分、尺寸度量、canonical metadata、parser block 输入、provider token 目标与空白 child 过滤对应 `chunker_version=6`。已有 chunks、FTS 和 embedding 属于旧 processing run 时，应随资源重新处理后再使用新的结构元数据。
 
 `sizeUnit` 是刻意显式化的边界：`parentChunkSize`、`childChunkSize`、`childOverlap` 和 `maxProtectedSize` 都不是模型 token 上限。每个 chunk 额外记录 `sizeMetrics`，其中 `estimated*Tokens` 是跨语言启发式估算；若 provider 注入真实 tokenizer，还会记录 `provider*Tokens` 和 tokenizer 身份。只有真实 tokenizer 可用时，`parentTokenTarget`/`childTokenTarget` 才会启用，否则配置会明确失败，不会把通用估算伪装成严格 token 上限。
 
@@ -243,6 +243,8 @@ child 默认目标约 384 个 code point，默认 overlap 目标为 76 个 code 
 - locator 指向 child 在 canonical text 中的范围；
 - 记录 `parent_chunk_id`，以便命中后恢复 parent 内容。
 
+child 的有效 embedding 输入必须包含正文或非空白 `contextHeader`；长度切分产生的纯空白尾部不会作为 child、FTS 行或 embedding task 持久化。原始 canonical text 仍完整保留，空白范围不参与检索。
+
 相邻普通 child 的 overlap 只向前扩展当前 child 的起点，不改变前一个 child 的终点，也不会跨 parent 边界。代码块、表格和公式 child 不使用 overlap，也不会跨保护结构边界扩展。普通 parent 足够小、只产生一个完全相同的 child 时会省略 parent 行；超过 child 目标的 protected parent 则保留，以便保留整体对象，并通过 `protectedGroup`、part 序号和 locator 重组超长结构。
 
 普通自然语言 child 可以合并多个短段落，但默认不跨代码、表格、公式等强结构边界；overlap 只在段落、换行、句子或词边界上生成，找不到安全边界时不强行制造重叠。
@@ -346,7 +348,7 @@ Markdown 标题有层级栈，启发式标题只有 section 边界和一行 head
 - 用 `sizeUnit=code_point` 明确分块目标单位；locator 和 preview 不再把目标描述成 token。
 - 记录正文与 embedding 输入的 `sizeMetrics`，包括 code point、UTF-8 byte 和 estimated token。
 - protected 结构的有效目标为 `min(target, maxProtectedSize)`；完整代码行/表格行分组不算 `forcedSplit`，只有真正打断结构才算。
-- 处理身份升级到 `chunker_version=5`，旧派生数据通过重新处理进入新协议。
+- 处理身份升级到 `chunker_version=6`，旧派生数据通过重新处理进入新协议。
 - 代码、表格和公式的结构诊断摘要随 canonical artifact 与 processing run 保存，作为诊断指标，不替代 retrieval 质量指标。
 
 ### P1：已完成

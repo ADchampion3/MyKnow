@@ -22,7 +22,7 @@ import {
 const id = () => crypto.randomUUID();
 const timestamp = () => new Date().toISOString();
 const sha = "a".repeat(64);
-const response = () => ({ req: { headers: {} }, writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } });
+const response = () => ({ respond(fetchResponse, body) { this.status = fetchResponse.status; this.body = body; } });
 
 const fixture = () => {
   const database = createDatabase(":memory:");

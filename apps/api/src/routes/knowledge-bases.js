@@ -8,56 +8,56 @@ export const handleKnowledgeBaseRoutes = ({ ctx, request }) => {
   const kbView = (row) => row ? { ...row, wikiDefaultMode: externalWikiMode(row.wikiDefaultMode || row.wiki_default_mode || "enabled") } : row;
 
   if (pathname === "/api/knowledge-bases" && method === "GET") {
-    ctx.json(res, 200, db.select().from(knowledgeBases).orderBy(desc(knowledgeBases.updatedAt)).all().map(kbView), null, requestId);
+    ctx.ok(res, 200, db.select().from(knowledgeBases).orderBy(desc(knowledgeBases.updatedAt)).all().map(kbView), requestId);
     return true;
   }
   if (pathname === "/api/knowledge-bases" && method === "POST") {
     let chunkingConfig;
     let wikiDefaultMode;
     try { chunkingConfig = JSON.stringify(normalizeChunkingConfig(body?.chunkingConfig ?? {})); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     try { wikiDefaultMode = normalizeWikiMode(body?.wikiDefaultMode ?? body?.wikiMode); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     const result = ctx.collection(body, { description: body?.description || null, chunkingConfig, wikiDefaultMode, status: "active" });
-    if (result.error) { ctx.json(res, 400, null, result.error, requestId); return true; }
+    if (result.error) { ctx.fail(res, 400, result.error, requestId); return true; }
     db.insert(knowledgeBases).values(result.value).run();
     ctx.audit("created", "knowledge_base", result.value.id, requestId, { chunkingConfig: JSON.parse(chunkingConfig) });
-    ctx.json(res, 201, kbView(result.value), null, requestId);
+    ctx.ok(res, 201, kbView(result.value), requestId);
     return true;
   }
 
   const knowledgeBaseMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)$/);
   if (knowledgeBaseMatch && method === "PATCH") {
     const found = sqlite.prepare("SELECT * FROM knowledge_bases WHERE id=? AND status='active'").get(knowledgeBaseMatch[1]);
-    if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!found) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     const nextName = body?.name === undefined ? found.name : ctx.inputName(body);
-    if (!nextName) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "name must be 1-120 characters"), requestId); return true; }
+    if (!nextName) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "name must be 1-120 characters"), requestId); return true; }
     let chunkingConfig = found.chunking_config;
     let wikiDefaultMode = found.wiki_default_mode;
     if (body?.chunkingConfig !== undefined) {
       try { chunkingConfig = JSON.stringify(normalizeChunkingConfig(body.chunkingConfig)); }
-      catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+      catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     }
     if (body?.wikiDefaultMode !== undefined || body?.wikiMode !== undefined) {
       try { wikiDefaultMode = normalizeWikiMode(body.wikiDefaultMode ?? body.wikiMode); }
-      catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+      catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     }
     sqlite.prepare("UPDATE knowledge_bases SET name=?,description=?,chunking_config=?,wiki_default_mode=?,updated_at=? WHERE id=?").run(nextName, body?.description === undefined ? found.description : body.description, chunkingConfig, wikiDefaultMode, ctx.now(), found.id);
     ctx.audit("updated", "knowledge_base", found.id, requestId, { chunkingConfigChanged: body?.chunkingConfig !== undefined, wikiDefaultModeChanged: body?.wikiDefaultMode !== undefined || body?.wikiMode !== undefined });
-    ctx.json(res, 200, kbView(db.select().from(knowledgeBases).where(eq(knowledgeBases.id, found.id)).get()), null, requestId);
+    ctx.ok(res, 200, kbView(db.select().from(knowledgeBases).where(eq(knowledgeBases.id, found.id)).get()), requestId);
     return true;
   }
 
   const processingRunsMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/processing-runs$/);
   if (processingRunsMatch && method === "GET") {
     const knowledgeBaseId = processingRunsMatch[1];
-    if (!ctx.validKb(knowledgeBaseId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!ctx.validKb(knowledgeBaseId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     const page = Number(request.parsed.searchParams.get("page") || 1);
     const limit = Number(request.parsed.searchParams.get("limit") || 50);
     const status = request.parsed.searchParams.get("status") || null;
     const allowedStatuses = new Set(["pending", "processing", "indexed", "failed", "superseded"]);
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (status && !allowedStatuses.has(status))) {
-      ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/status is invalid"), requestId);
+      ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "page/limit/status is invalid"), requestId);
       return true;
     }
     const filters = ["rkb.knowledge_base_id=?"];
@@ -84,29 +84,29 @@ export const handleKnowledgeBaseRoutes = ({ ctx, request }) => {
       updatedAt: run.updated_at,
       embeddingProgress: redactSecrets(embeddingProgressForRun(sqlite, run.id, ctx.config))
     }));
-    ctx.json(res, 200, { items, page, limit, total, pageCount: Math.ceil(total / limit) }, null, requestId);
+    ctx.ok(res, 200, { items, page, limit, total, pageCount: Math.ceil(total / limit) }, requestId);
     return true;
   }
 
   const auditEventsMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/audit-events$/);
   if (auditEventsMatch && method === "GET") {
     const knowledgeBaseId = auditEventsMatch[1];
-    if (!ctx.validKb(knowledgeBaseId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!ctx.validKb(knowledgeBaseId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     const page = Number(request.parsed.searchParams.get("page") || 1);
     const limit = Number(request.parsed.searchParams.get("limit") || 50);
     const eventType = request.parsed.searchParams.get("eventType") || null;
     const resourceVersionId = request.parsed.searchParams.get("resourceVersionId") || null;
     const processingRunId = request.parsed.searchParams.get("processingRunId") || null;
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (eventType && eventType.length > 80) || (resourceVersionId && resourceVersionId.length > 200) || (processingRunId && processingRunId.length > 200)) {
-      ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/filter is invalid"), requestId);
+      ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "page/limit/filter is invalid"), requestId);
       return true;
     }
     if (resourceVersionId && !sqlite.prepare("SELECT rv.id FROM resource_versions rv JOIN resource_knowledge_bases rkb ON rkb.resource_id=rv.resource_id WHERE rv.id=? AND rkb.knowledge_base_id=?").get(resourceVersionId, knowledgeBaseId)) {
-      ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource version not found in this knowledge base"), requestId);
+      ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource version not found in this knowledge base"), requestId);
       return true;
     }
     if (processingRunId && !sqlite.prepare("SELECT pr.id FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id JOIN resource_knowledge_bases rkb ON rkb.resource_id=rv.resource_id WHERE pr.id=? AND rkb.knowledge_base_id=?").get(processingRunId, knowledgeBaseId)) {
-      ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Processing run not found in this knowledge base"), requestId);
+      ctx.fail(res, 404, ctx.error("NOT_FOUND", "Processing run not found in this knowledge base"), requestId);
       return true;
     }
     const scope = `
@@ -146,35 +146,35 @@ export const handleKnowledgeBaseRoutes = ({ ctx, request }) => {
     const total = sqlite.prepare(`${scope} SELECT count(*) AS total FROM audit_logs al WHERE ${where}`).get(...args).total;
     const rows = sqlite.prepare(`${scope} SELECT al.id,al.event_type,al.entity_type,al.entity_id,al.request_id,al.metadata,al.created_at FROM audit_logs al WHERE ${where} ORDER BY al.created_at DESC,al.id DESC LIMIT ? OFFSET ?`).all(...args, limit, (page - 1) * limit);
     const parseMetadata = (value) => { try { return redactAuditMetadata(JSON.parse(value || "{}")); } catch { return {}; } };
-    ctx.json(res, 200, { items: rows.map((event) => ({ id: event.id, eventType: event.event_type, entityType: event.entity_type, entityId: event.entity_id, requestId: event.request_id, metadata: parseMetadata(event.metadata), createdAt: event.created_at })), page, limit, total, pageCount: Math.ceil(total / limit) }, null, requestId);
+    ctx.ok(res, 200, { items: rows.map((event) => ({ id: event.id, eventType: event.event_type, entityType: event.entity_type, entityId: event.entity_id, requestId: event.request_id, metadata: parseMetadata(event.metadata), createdAt: event.created_at })), page, limit, total, pageCount: Math.ceil(total / limit) }, requestId);
     return true;
   }
 
   const spaceMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/spaces$/);
   if (spaceMatch && method === "GET") {
-    ctx.json(res, 200, db.select().from(spaces).where(eq(spaces.knowledgeBaseId, spaceMatch[1])).all(), null, requestId);
+    ctx.ok(res, 200, db.select().from(spaces).where(eq(spaces.knowledgeBaseId, spaceMatch[1])).all(), requestId);
     return true;
   }
   if (spaceMatch && method === "POST") {
-    if (!ctx.validKb(spaceMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!ctx.validKb(spaceMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     const result = ctx.collection(body, { knowledgeBaseId: spaceMatch[1], status: "active" });
-    if (result.error) { ctx.json(res, 400, null, result.error, requestId); return true; }
+    if (result.error) { ctx.fail(res, 400, result.error, requestId); return true; }
     db.insert(spaces).values(result.value).run();
-    ctx.json(res, 201, result.value, null, requestId);
+    ctx.ok(res, 201, result.value, requestId);
     return true;
   }
 
   const tagMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/tags$/);
   if (tagMatch && method === "GET") {
-    ctx.json(res, 200, db.select().from(tags).where(eq(tags.knowledgeBaseId, tagMatch[1])).all(), null, requestId);
+    ctx.ok(res, 200, db.select().from(tags).where(eq(tags.knowledgeBaseId, tagMatch[1])).all(), requestId);
     return true;
   }
   if (tagMatch && method === "POST") {
-    if (!ctx.validKb(tagMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!ctx.validKb(tagMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     const result = ctx.collection(body, { knowledgeBaseId: tagMatch[1] });
-    if (result.error) { ctx.json(res, 400, null, result.error, requestId); return true; }
+    if (result.error) { ctx.fail(res, 400, result.error, requestId); return true; }
     db.insert(tags).values(result.value).run();
-    ctx.json(res, 201, result.value, null, requestId);
+    ctx.ok(res, 201, result.value, requestId);
     return true;
   }
   return false;

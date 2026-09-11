@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { Readable } from "node:stream";
+import { z } from "zod";
 import { redactSecrets } from "@myknow/config";
 
 const errorStatus = new Map([
@@ -20,6 +22,7 @@ const errorStatus = new Map([
   ["WIKI_PAGE_METADATA_ONLY", 409],
   ["WIKI_CITATION_INVALID", 400],
   ["TASK_CANCELLED", 409],
+  ["PROCESSING_RUN_SUPERSEDED", 409],
   ["OCR_MODE_INVALID", 400],
   ["OCR_PROVIDER_INVALID", 400],
   ["OCR_PROVIDER_REQUIRED", 400],
@@ -64,98 +67,218 @@ const errorStatus = new Map([
   ["INTERNAL_ERROR", 500]
 ]);
 
-const allowedOrigin = (origin, webPort) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/.test(origin || "") ? origin : `http://localhost:${webPort}`;
+const allowedOrigin = (origin, webPort) => /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/u.test(origin || "") ? origin : `http://localhost:${webPort}`;
+const validationError = (message) => Object.assign(new Error(message), { code: "VALIDATION_ERROR" });
+const jsonBodySchema = z.object({}).passthrough();
+const uploadFileSchema = z.object({
+  filename: z.string().max(255),
+  mimeType: z.string().max(255),
+  bytes: z.instanceof(Buffer)
+});
+const uploadBodySchema = z.object({
+  name: z.string().max(120).optional(),
+  knowledgeBaseId: z.string().max(200).optional(),
+  file: uploadFileSchema.optional(),
+  content: z.string().optional(),
+  mimeType: z.string().max(255).optional(),
+  ocrMode: z.union([z.string(), z.null()]).optional(),
+  ocrProvider: z.union([z.string(), z.null()]).optional(),
+  ocrCapabilities: z.unknown().optional(),
+  refreshOcr: z.union([z.string(), z.boolean(), z.null()]).optional(),
+  chunkingConfig: z.unknown().optional(),
+  wikiMode: z.unknown().optional()
+}).passthrough();
+
+const bodySchemaFor = ({ pathname, method }) => method === "POST" && (pathname === "/api/resources" || /^\/api\/resources\/[^/]+\/versions$/u.test(pathname))
+  ? uploadBodySchema
+  : jsonBodySchema;
+
+const formatIssues = (issues) => issues.map((issue) => {
+  const path = issue.path.length ? issue.path.join(".") : "body";
+  return `${path}: ${issue.message}`;
+}).join("; ");
+
+const parseSchema = (schema, value) => {
+  const result = schema.safeParse(value);
+  if (!result.success) throw validationError(formatIssues(result.error.issues));
+  return result.data;
+};
+
+const isBlob = (value) => typeof Blob !== "undefined" && value instanceof Blob;
+
+const formDataObject = async (formData) => {
+  const body = {};
+  for (const [key, value] of formData.entries()) {
+    body[key] = isBlob(value)
+      ? {
+          filename: typeof value.name === "string" && value.name ? value.name : "blob",
+          mimeType: value.type || "application/octet-stream",
+          bytes: Buffer.from(await value.arrayBuffer())
+        }
+      : value;
+  }
+  return body;
+};
+
+const contentLength = (request) => {
+  const raw = request.headers.get("content-length");
+  if (raw === null) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+};
+
+const readBody = async (request, schema = jsonBodySchema) => {
+  if (!(request instanceof Request)) throw validationError("a Fetch Request is required");
+  if (!request.body || contentLength(request) === 0) return parseSchema(schema, {});
+
+  const mediaType = (request.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+  let value;
+  if (mediaType === "application/json") {
+    try { value = await request.json(); }
+    catch (caught) {
+      if (caught?.code) throw caught;
+      throw validationError("invalid JSON body");
+    }
+  } else if (mediaType === "multipart/form-data") {
+    try { value = await formDataObject(await request.formData()); }
+    catch (caught) {
+      if (caught?.code) throw caught;
+      throw validationError("invalid multipart form data");
+    }
+  } else {
+    throw validationError("content-type must be application/json or multipart/form-data");
+  }
+  return parseSchema(schema, value);
+};
+
+const bodyLimitFor = (config) => {
+  const resourceLimit = Number(config.resourceMaxBytes ?? 2_000_000);
+  // ponytail: keep multipart uploads in-process while the configured ceiling is small; upgrade to object-storage keys before allowing hundreds of MB.
+  return Number.isFinite(resourceLimit) ? resourceLimit + 512 * 1024 : Number.POSITIVE_INFINITY;
+};
+
+const limitedRequest = (request, maxBytes) => {
+  if (!request.body || !Number.isFinite(maxBytes)) return request;
+  const knownLength = contentLength(request);
+  if (Number.isFinite(knownLength) && knownLength > maxBytes) {
+    const body = new ReadableStream({ start(controller) { controller.error(validationError("request body is too large")); } });
+    return new Request(request, { body, duplex: "half" });
+  }
+
+  let size = 0;
+  const body = request.body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      const chunkSize = typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.byteLength;
+      size += chunkSize;
+      if (size > maxBytes) {
+        controller.error(validationError("request body is too large"));
+        return;
+      }
+      controller.enqueue(chunk);
+    }
+  }));
+  return new Request(request, { body, duplex: "half" });
+};
+
+const headersFromNode = (nodeRequest) => {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(nodeRequest.headers || {})) {
+    if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : String(value));
+  }
+  return headers;
+};
+
+const createReply = (origin = null) => ({
+  origin,
+  response: null,
+  payload: null,
+  respond(response, payload = null) {
+    this.response = response;
+    this.payload = payload;
+  }
+});
 
 export const createHttpTools = ({ config }) => {
-  const json = (res, status, data, error = null, requestId = crypto.randomUUID()) => {
-    res.writeHead(status, {
-      "content-type": "application/json",
-      "access-control-allow-origin": allowedOrigin(res.req?.headers?.origin, config.webPort),
-      "access-control-allow-headers": "content-type, idempotency-key"
-    });
-    res.end(JSON.stringify({ data, error: redactSecrets(error), requestId }));
-  };
-
-  const readRawBody = (req) => new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let settled = false;
-    const maxBytes = config.resourceMaxBytes + 512 * 1024;
-    const fail = (error) => { if (!settled) { settled = true; reject(error); } };
-    req.on("data", (chunk) => {
-      if (settled) return;
-      size += chunk.byteLength;
-      if (size > maxBytes) { fail(Object.assign(new Error("body too large"), { code: "VALIDATION_ERROR" })); return; }
-      chunks.push(Buffer.from(chunk));
-    });
-    req.on("end", () => { if (!settled) { settled = true; resolve(Buffer.concat(chunks)); } });
-    req.on("error", fail);
+  const responseHeaders = (reply, requestId, extra = {}) => ({
+    "access-control-allow-origin": allowedOrigin(reply?.origin, config.webPort),
+    "access-control-allow-headers": "content-type, idempotency-key",
+    "x-request-id": requestId,
+    ...extra
   });
 
-  const parseMultipart = (raw, contentType) => {
-    const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || "");
-    if (!boundaryMatch) throw Object.assign(new Error("multipart boundary is required"), { code: "VALIDATION_ERROR" });
-    const boundary = boundaryMatch[1] || boundaryMatch[2];
-    const delimiter = Buffer.from(`--${boundary}`);
-    const delimiterLine = Buffer.from(`\r\n--${boundary}`);
-    const headerSeparator = Buffer.from("\r\n\r\n");
-    const invalid = () => { throw Object.assign(new Error("invalid multipart body"), { code: "VALIDATION_ERROR" }); };
-    const fields = {};
-    let file = null;
-    let cursor = raw.indexOf(delimiter);
-    if (cursor < 0 || (cursor > 0 && raw.subarray(0, cursor).toString("latin1") !== "\r\n")) invalid();
-    while (cursor >= 0) {
-      if (!raw.subarray(cursor, cursor + delimiter.length).equals(delimiter)) invalid();
-      cursor += delimiter.length;
-      const suffix = raw.subarray(cursor, cursor + 2).toString("latin1");
-      if (suffix === "--") break;
-      if (suffix !== "\r\n") invalid();
-      cursor += 2;
-      const headerEnd = raw.indexOf(headerSeparator, cursor);
-      if (headerEnd < 0) invalid();
-      const headerText = raw.subarray(cursor, headerEnd).toString("latin1");
-      const bodyStart = headerEnd + headerSeparator.length;
-      let next = raw.indexOf(delimiterLine, bodyStart);
-      while (next >= 0) {
-        const afterDelimiter = next + delimiterLine.length;
-        const delimiterSuffix = raw.subarray(afterDelimiter, afterDelimiter + 2).toString("latin1");
-        if (delimiterSuffix === "\r\n" || delimiterSuffix === "--") break;
-        next = raw.indexOf(delimiterLine, next + 1);
-      }
-      if (next < 0) invalid();
-      const disposition = /content-disposition:\s*form-data;\s*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i.exec(headerText);
-      if (!disposition) invalid();
-      const fieldName = disposition[1];
-      const filename = disposition[2];
-      const type = /content-type:\s*([^\r\n]+)/i.exec(headerText)?.[1]?.trim() || "application/octet-stream";
-      const value = raw.subarray(bodyStart, next);
-      if (filename !== undefined) {
-        if (file) invalid();
-        file = { filename, mimeType: type, bytes: Buffer.from(value) };
-      } else fields[fieldName] = value.toString("utf8");
-      cursor = next + 2;
-    }
-    return { ...fields, file };
+  const publish = (reply, response, payload) => {
+    if (typeof reply?.respond !== "function") throw new TypeError("HTTP response sink is required");
+    reply.respond(response, payload);
+    return response;
   };
 
-  const readBody = async (req) => {
-    const raw = await readRawBody(req);
-    if (!raw.length) return {};
-    const contentType = req.headers["content-type"] || "";
-    if (/^multipart\/form-data/i.test(contentType)) return parseMultipart(raw, contentType);
-    if (!/^application\/json/i.test(contentType)) throw Object.assign(new Error("content-type must be application/json or multipart/form-data"), { code: "VALIDATION_ERROR" });
-    try { return JSON.parse(raw.toString("utf8")); }
-    catch { throw Object.assign(new Error("invalid JSON"), { code: "VALIDATION_ERROR" }); }
+  const ok = (reply, status, data, requestId = crypto.randomUUID()) => {
+    if (status === 204) return empty(reply, status, requestId);
+    const payload = { data, error: null, requestId };
+    return publish(reply, Response.json(payload, { status, headers: responseHeaders(reply, requestId) }), payload);
   };
+
+  const fail = (reply, status, problem, requestId = crypto.randomUUID()) => {
+    const payload = { data: null, error: redactSecrets(problem), requestId };
+    return publish(reply, Response.json(payload, { status, headers: responseHeaders(reply, requestId) }), payload);
+  };
+
+  const empty = (reply, status, requestId = crypto.randomUUID(), extraHeaders = {}) => publish(
+    reply,
+    new Response(null, { status, headers: responseHeaders(reply, requestId, extraHeaders) }),
+    null
+  );
+
+  const binary = (reply, status, bytes, requestId = crypto.randomUUID(), extraHeaders = {}) => publish(
+    reply,
+    new Response(bytes, { status, headers: responseHeaders(reply, requestId, extraHeaders) }),
+    null
+  );
 
   const error = (code, message) => ({ code, message });
-  const respondCaught = (res, caught, requestId) => {
+  const respondCaught = (reply, caught, requestId) => {
     const caughtCode = typeof caught?.code === "string" ? caught.code : "";
     const code = caughtCode.startsWith("SQLITE_CONSTRAINT_UNIQUE") ? "DUPLICATE_NAME" : errorStatus.has(caughtCode) ? caughtCode : "INTERNAL_ERROR";
     const providerFailure = /^(?:MODEL_|EMBEDDING_|OCR_PROVIDER_|OCR_CACHE_|PROVIDER_|TRANSIENT_)/u.test(code);
     const message = code === "INTERNAL_ERROR" ? "Internal server error" : providerFailure ? `${code}: provider details redacted` : redactSecrets(caught?.message || code);
-    return json(res, errorStatus.get(code), null, error(code, message), requestId);
+    return fail(reply, errorStatus.get(code), error(code, message), requestId);
   };
 
-  return { allowedOrigin: (origin) => allowedOrigin(origin, config.webPort), json, readBody, error, respondCaught };
+  const requestFromNode = (nodeRequest) => {
+    const method = String(nodeRequest.method || "GET").toUpperCase();
+    const headers = headersFromNode(nodeRequest);
+    const hasBody = !["GET", "HEAD"].includes(method);
+    const init = { method, headers };
+    if (hasBody) {
+      init.body = Readable.toWeb(nodeRequest);
+      init.duplex = "half";
+    }
+    return new Request(new URL(nodeRequest.url || "/", "http://localhost"), init);
+  };
+
+  const readBodyWithLimit = (request, schema = jsonBodySchema) => readBody(limitedRequest(request, bodyLimitFor(config)), schema);
+
+  const sendToNodeResponse = async (nodeResponse, response) => {
+    if (!response || typeof nodeResponse?.status !== "function" || typeof nodeResponse?.set !== "function" || typeof nodeResponse?.send !== "function") {
+      throw new Error("HTTP adapter requires an Express-compatible response");
+    }
+    const target = nodeResponse.status(response.status);
+    target.set(Object.fromEntries(response.headers.entries()));
+    return response.status === 204 ? target.send() : target.send(Buffer.from(await response.arrayBuffer()));
+  };
+
+  return {
+    allowedOrigin: (origin) => allowedOrigin(origin, config.webPort),
+    bodySchemaFor,
+    createReply,
+    error,
+    empty,
+    binary,
+    ok,
+    fail,
+    readBody: readBodyWithLimit,
+    requestFromNode,
+    respondCaught,
+    sendToNodeResponse
+  };
 };

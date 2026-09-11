@@ -3,5 +3,5 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {"dev": "node src/nest.js", "start": "node src/nest.js"},
-  "dependencies": {"@myknow/config": "0.0.0", "@myknow/db": "0.0.0"}
+  "dependencies": {"@myknow/config": "0.0.0", "@myknow/db": "0.0.0", "zod": "^4.5.4"}
 }

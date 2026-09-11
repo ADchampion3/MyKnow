@@ -7,7 +7,7 @@ import { loadConfig } from "@myknow/config";
 class AppModule {}
 Module({})(AppModule);
 const config = loadConfig();
-const app = await NestFactory.create(AppModule);
+const app = await NestFactory.create(AppModule, { bodyParser: false });
 app.getHttpAdapter().getInstance().use(requestHandler);
 await app.listen(config.apiPort);
 console.log(`NestJS API listening on http://localhost:${config.apiPort}`);

@@ -39,6 +39,9 @@ docs/RETRIEVAL_MECHANISM.md  当前检索机制与审核
 
 项目细节仍在重新设计中；新的设计决定和验证方式应在需求明确后再补充。
 
+API 的 Fetch 请求/响应边界、Zod 校验、错误脱敏和上传大小策略见
+[`docs/API_HTTP_BOUNDARY.md`](docs/API_HTTP_BOUNDARY.md)。
+
 ## Wiki mechanism
 
 Wiki 页面、版本、引用、索引和 Agent 审核机制见 [`docs/WIKI_MECHANISM.md`](docs/WIKI_MECHANISM.md)。

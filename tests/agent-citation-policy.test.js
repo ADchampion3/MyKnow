@@ -21,6 +21,7 @@ import {
 const id = () => crypto.randomUUID();
 const timestamp = () => new Date().toISOString();
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
+const response = () => ({ respond(fetchResponse, body) { this.status = fetchResponse.status; this.body = body; } });
 
 const fixture = () => {
   const database = createDatabase(":memory:");
@@ -137,16 +138,16 @@ describe("Agent citation policy", () => {
     const { database, knowledgeBaseId, pageId } = fixture();
     const config = loadConfig({ MODEL_PROVIDER: "mock", RESOURCE_STORAGE_DIR: ".", AGENT_CITATION_POLICY: "warn" });
     const ctx = createApiContext({ config, sqlite: database.sqlite, db: database.db, http: createHttpTools({ config }) });
-    const response = { req: { headers: {} }, writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } };
+    const runResponse = response();
     try {
-      await handleAgentRoutes({ ctx, request: { pathname: "/api/agent/runs", method: "POST", body: { kind: "organize", knowledgeBaseId, wikiPageIds: [pageId], prompt: "organize" }, requestId: id(), idempotencyKey: null, res: response } });
-      expect(response.status).toBe(202);
-      expect(response.body.data.agentRun.citationPolicy).toBe("warn");
-      expect(database.sqlite.prepare("SELECT citation_policy FROM agent_runs WHERE id=?").get(response.body.data.agentRun.id).citation_policy).toBe("warn");
+      await handleAgentRoutes({ ctx, request: { pathname: "/api/agent/runs", method: "POST", body: { kind: "organize", knowledgeBaseId, wikiPageIds: [pageId], prompt: "organize" }, requestId: id(), idempotencyKey: null, res: runResponse } });
+      expect(runResponse.status).toBe(202);
+      expect(runResponse.body.data.agentRun.citationPolicy).toBe("warn");
+      expect(database.sqlite.prepare("SELECT citation_policy FROM agent_runs WHERE id=?").get(runResponse.body.data.agentRun.id).citation_policy).toBe("warn");
 
-      const sessionResponse = { req: { headers: {} }, writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } };
+      const sessionResponse = response();
       await handleAgentRoutes({ ctx, request: { pathname: "/api/chat/sessions", method: "POST", body: {}, requestId: id(), idempotencyKey: null, res: sessionResponse } });
-      const messageResponse = { req: { headers: {} }, writeHead(status) { this.status = status; }, end(body) { this.body = JSON.parse(body); } };
+      const messageResponse = response();
       await handleAgentRoutes({ ctx, request: { pathname: `/api/chat/sessions/${sessionResponse.body.data.id}/messages`, method: "POST", body: { content: "hello" }, requestId: id(), idempotencyKey: null, res: messageResponse } });
       expect(messageResponse.status).toBe(202);
       expect(messageResponse.body.data.agentRun.citationPolicy).toBe("required");

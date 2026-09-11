@@ -10,27 +10,27 @@ export const handleTaskRoutes = ({ ctx, request }) => {
   const { db, sqlite } = ctx;
 
   if (pathname === "/api/tasks" && method === "GET") {
-    ctx.json(res, 200, db.select().from(tasks).orderBy(desc(tasks.createdAt)).all().map((task) => ctx.taskView(task)), null, requestId);
+    ctx.ok(res, 200, db.select().from(tasks).orderBy(desc(tasks.createdAt)).all().map((task) => ctx.taskView(task)), requestId);
     return true;
   }
   if (pathname === "/api/tasks" && method === "POST") {
     if (!["demo_success", "demo_failure", "demo_retryable"].includes(body?.type)) {
-      ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "type must be demo_success, demo_failure, or demo_retryable"), requestId);
+      ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "type must be demo_success, demo_failure, or demo_retryable"), requestId);
       return true;
     }
     const timestamp = ctx.now();
     const value = { id: crypto.randomUUID(), type: body.type, status: "queued", progress: 0, retryLimit: 3, retryCount: 0, createdAt: timestamp, updatedAt: timestamp };
     db.insert(tasks).values(value).run();
     ctx.audit("created", "task", value.id, requestId, { type: value.type });
-    ctx.json(res, 201, value, null, requestId);
+    ctx.ok(res, 201, value, requestId);
     return true;
   }
 
   const cancelTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
   if (cancelTaskMatch && method === "POST") {
     const task = db.select().from(tasks).where(eq(tasks.id, cancelTaskMatch[1])).get();
-    if (!task) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
-    if (["succeeded", "failed"].includes(task.status)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only queued or running tasks can be cancelled"), requestId); return true; }
+    if (!task) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
+    if (["succeeded", "failed"].includes(task.status)) { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "Only queued or running tasks can be cancelled"), requestId); return true; }
     const timestamp = ctx.now();
     let changed = false;
     sqlite.transaction(() => {
@@ -52,22 +52,22 @@ export const handleTaskRoutes = ({ ctx, request }) => {
       if (task.type === "retrieval:embed" && processingRunForTask(task)) reconcileEmbeddingProgress(sqlite, { processingRunId: processingRunForTask(task), config: ctx.config, audit: (eventType, entityType, entityId, metadata) => ctx.audit(eventType, entityType, entityId, requestId, metadata) });
       ctx.audit("cancel_requested", "task", task.id, requestId, { status: task.status });
     })();
-    if (!changed) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Task is no longer cancellable"), requestId); return true; }
-    ctx.json(res, 202, ctx.taskView(sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id)), null, requestId);
+    if (!changed) { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "Task is no longer cancellable"), requestId); return true; }
+    ctx.ok(res, 202, ctx.taskView(sqlite.prepare("SELECT * FROM tasks WHERE id=?").get(task.id)), requestId);
     return true;
   }
 
   const retryTaskMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/retry$/);
   if (retryTaskMatch && method === "POST") {
     const task = db.select().from(tasks).where(eq(tasks.id, retryTaskMatch[1])).get();
-    if (!task) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
-    if (task.status !== "failed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed tasks can be retried"), requestId); return true; }
+    if (!task) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Task not found"), requestId); return true; }
+    if (task.status !== "failed") { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "Only failed tasks can be retried"), requestId); return true; }
     const processingRunId = processingRunForTask(task);
     if (task.type === "retrieval:embed" && processingRunId && sqlite.prepare("SELECT status FROM processing_runs WHERE id=?").get(processingRunId)?.status === "superseded") {
-      ctx.json(res, 409, null, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task belongs to a superseded processing run"), requestId);
+      ctx.fail(res, 409, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task belongs to a superseded processing run"), requestId);
       return true;
     }
-    if (task.retryCount >= task.retryLimit && task.type !== "resource:process") { ctx.json(res, 409, null, ctx.error("TASK_RETRY_LIMIT", "Task retry limit reached"), requestId); return true; }
+    if (task.retryCount >= task.retryLimit && task.type !== "resource:process") { ctx.fail(res, 409, ctx.error("TASK_RETRY_LIMIT", "Task retry limit reached"), requestId); return true; }
     const timestamp = ctx.now();
     const resourceVersionId = task.resourceVersionId ?? task.resource_version_id ?? null;
     const retryLimit = task.retryLimit ?? task.retry_limit ?? 3;
@@ -93,14 +93,15 @@ export const handleTaskRoutes = ({ ctx, request }) => {
       }
       ctx.audit("retry_requested", "task", task.id, requestId, { replacementTaskId: replacement.id });
     })();
-    ctx.json(res, 202, ctx.taskView(replacement), null, requestId);
+    ctx.ok(res, 202, ctx.taskView(replacement), requestId);
     return true;
   }
 
   const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
   if (taskMatch && method === "GET") {
     const task = db.select().from(tasks).where(eq(tasks.id, taskMatch[1])).get();
-    ctx.json(res, task ? 200 : 404, task ? ctx.taskView(task) : null, task ? null : ctx.error("NOT_FOUND", "Task not found"), requestId);
+    if (task) ctx.ok(res, 200, ctx.taskView(task), requestId);
+    else ctx.fail(res, 404, ctx.error("NOT_FOUND", "Task not found"), requestId);
     return true;
   }
   return false;

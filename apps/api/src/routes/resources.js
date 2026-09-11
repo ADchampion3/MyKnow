@@ -144,14 +144,14 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
 
   if (pathname === "/api/resources" && method === "POST") {
     const result = await importResource(ctx, { body, requestId, idempotencyKey });
-    ctx.json(res, result.status, result.data, null, requestId);
+    ctx.ok(res, result.status, result.data, requestId);
     return true;
   }
 
   const versionCreateMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions$/);
   if (versionCreateMatch && method === "POST") {
     const result = await importResource(ctx, { body, requestId, idempotencyKey, resourceId: versionCreateMatch[1] });
-    ctx.json(res, result.status, result.data, null, requestId);
+    ctx.ok(res, result.status, result.data, requestId);
     return true;
   }
 
@@ -168,7 +168,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
       }
     })();
     ctx.audit("rebuild_queued", "resources", "all", requestId, { queued });
-    ctx.json(res, 202, { queued, mode: "build-then-swap", versions: "all-active" }, null, requestId);
+    ctx.ok(res, 202, { queued, mode: "build-then-swap", versions: "all-active" }, requestId);
     return true;
   }
 
@@ -179,7 +179,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     const page = Number(parsed.searchParams.get("page") || 1);
     const limit = Number(parsed.searchParams.get("limit") || 50);
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (status && !resourceStatuses.has(status))) {
-      ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/status is invalid"), requestId);
+      ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "page/limit/status is invalid"), requestId);
       return true;
     }
     const clauses = [];
@@ -191,14 +191,14 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
     if (clauses.length) sql += ` WHERE ${clauses.join(" AND ")}`;
     sql += " ORDER BY r.updated_at DESC,r.id DESC LIMIT ? OFFSET ?";
     args.push(limit, (page - 1) * limit);
-    ctx.json(res, 200, sqlite.prepare(sql).all(...args).map((row) => resourcePayload(ctx, row)), null, requestId);
+    ctx.ok(res, 200, sqlite.prepare(sql).all(...args).map((row) => resourcePayload(ctx, row)), requestId);
     return true;
   }
 
   const archiveMatch = pathname.match(/^\/api\/resources\/([^/]+)\/(archive|restore)$/);
   if (archiveMatch && method === "POST") {
     const resource = ctx.resource(archiveMatch[1]);
-    if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (!resource) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
     const timestamp = ctx.now();
     if (archiveMatch[2] === "archive") {
       sqlite.transaction(() => {
@@ -206,7 +206,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
         sqlite.prepare("UPDATE tasks SET cancel_requested=1,status=CASE WHEN status IN ('queued','retrying') THEN 'failed' ELSE status END,error_code=CASE WHEN status IN ('queued','retrying') THEN 'RESOURCE_ARCHIVED' ELSE error_code END,error_summary=CASE WHEN status IN ('queued','retrying') THEN 'Resource archived' ELSE error_summary END,finished_at=CASE WHEN status IN ('queued','retrying') THEN ? ELSE finished_at END,updated_at=? WHERE resource_version_id IN (SELECT id FROM resource_versions WHERE resource_id=?) AND status IN ('queued','running','retrying')").run(timestamp, timestamp, resource.id);
         ctx.audit("archived", "resource", resource.id, requestId);
       })();
-      ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
+      ctx.ok(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), requestId);
       return true;
     }
     let queued = 0;
@@ -219,47 +219,47 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
       refreshResourceStatus(sqlite, resource.id, timestamp);
       ctx.audit("restored", "resource", resource.id, requestId, { queued });
     })();
-    ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
+    ctx.ok(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), requestId);
     return true;
   }
 
   const resourceMatch = pathname.match(/^\/api\/resources\/([^/]+)$/);
   if (resourceMatch && method === "PATCH") {
     const resource = ctx.resource(resourceMatch[1]);
-    if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (!resource) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
     const writable = new Set(["name", "wikiMode", "wiki_mode"]);
     const unsupported = Object.keys(body || {}).filter((key) => !writable.has(key));
-    if (unsupported.length) { ctx.json(res, 409, null, ctx.error("RESOURCE_READ_ONLY", "Only display name and wiki mode can be changed; source content is immutable"), requestId); return true; }
+    if (unsupported.length) { ctx.fail(res, 409, ctx.error("RESOURCE_READ_ONLY", "Only display name and wiki mode can be changed; source content is immutable"), requestId); return true; }
     const name = body?.name === undefined ? resource.name : ctx.inputName(body);
-    if (!name) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "name must be 1-120 characters"), requestId); return true; }
+    if (!name) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "name must be 1-120 characters"), requestId); return true; }
     let wikiMode = resource.wiki_mode;
     if (body?.wikiMode !== undefined || body?.wiki_mode !== undefined) {
       try { wikiMode = normalizeWikiMode(body.wikiMode ?? body.wiki_mode, { nullable: true }); }
-      catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+      catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     }
     sqlite.prepare("UPDATE resources SET name=?,wiki_mode=?,updated_at=? WHERE id=?").run(name, wikiMode, ctx.now(), resource.id);
     ctx.audit("updated", "resource", resource.id, requestId, { nameChanged: name !== resource.name, wikiMode: wikiMode ? externalWikiMode(wikiMode) : null });
-    ctx.json(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), null, requestId);
+    ctx.ok(res, 200, resourcePayload(ctx, ctx.resource(resource.id)), requestId);
     return true;
   }
   if (resourceMatch && method === "DELETE") {
     const resource = ctx.resource(resourceMatch[1]);
-    if (!resource) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    ctx.json(res, 409, null, ctx.error("RESOURCE_READ_ONLY", "Original resources cannot be deleted; archive them instead"), requestId);
+    if (!resource) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    ctx.fail(res, 409, ctx.error("RESOURCE_READ_ONLY", "Original resources cannot be deleted; archive them instead"), requestId);
     return true;
   }
   if (resourceMatch && method === "GET") {
     const found = ctx.resource(resourceMatch[1]);
-    if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    ctx.json(res, 200, resourcePayload(ctx, found), null, requestId);
+    if (!found) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    ctx.ok(res, 200, resourcePayload(ctx, found), requestId);
     return true;
   }
 
   const processingRunsMatch = pathname.match(/^\/api\/resources\/([^/]+)\/processing-runs$/);
   if (processingRunsMatch && method === "GET") {
-    if (!ctx.resource(processingRunsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (!ctx.resource(processingRunsMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
     const runs = sqlite.prepare("SELECT pr.*,rv.resource_id,r.name AS resource_name,rv.content_sha256 AS source_sha256 FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id JOIN resources r ON r.id=rv.resource_id WHERE rv.resource_id=? ORDER BY pr.created_at DESC,pr.id DESC").all(processingRunsMatch[1]);
-    ctx.json(res, 200, runs.map((run) => ({ ...ctx.runView(run), error_summary: run.error_summary ? redactSecrets(run.error_summary) : null, resourceId: run.resource_id, resourceVersionId: run.resource_version_id, resourceName: run.resource_name, embeddingProgress: redactSecrets(embeddingProgressForRun(sqlite, run.id, config)), attempts: sqlite.prepare("SELECT id,processing_run_id,reader_name,reader_version,status,error_code,error_summary,metadata,started_at,finished_at FROM processing_run_attempts WHERE processing_run_id=? ORDER BY started_at,id").all(run.id).map((attempt) => ({ ...attempt, error_summary: attempt.error_summary ? redactSecrets(attempt.error_summary) : null })) })), null, requestId);
+    ctx.ok(res, 200, runs.map((run) => ({ ...ctx.runView(run), error_summary: run.error_summary ? redactSecrets(run.error_summary) : null, resourceId: run.resource_id, resourceVersionId: run.resource_version_id, resourceName: run.resource_name, embeddingProgress: redactSecrets(embeddingProgressForRun(sqlite, run.id, config)), attempts: sqlite.prepare("SELECT id,processing_run_id,reader_name,reader_version,status,error_code,error_summary,metadata,started_at,finished_at FROM processing_run_attempts WHERE processing_run_id=? ORDER BY started_at,id").all(run.id).map((attempt) => ({ ...attempt, error_summary: attempt.error_summary ? redactSecrets(attempt.error_summary) : null })) })), requestId);
     return true;
   }
 
@@ -267,18 +267,18 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (embeddingTasksMatch && method === "GET") {
     const resource = ctx.resource(embeddingTasksMatch[1]);
     const run = resource && sqlite.prepare("SELECT pr.* FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(embeddingTasksMatch[2], resource.id);
-    if (!run) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Processing run not found"), requestId); return true; }
+    if (!run) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Processing run not found"), requestId); return true; }
     const page = Number(parsed.searchParams.get("page") || 1);
     const limit = Number(parsed.searchParams.get("limit") || 50);
     const status = parsed.searchParams.get("status") || null;
     const errorCode = parsed.searchParams.get("errorCode") || null;
     if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (status && !new Set(["ready", "queued", "running", "retrying", "failed", "cancelled", "missing"]).has(status)) || (errorCode && (errorCode.length > 120 || !/^[A-Z0-9_:-]+$/.test(errorCode)))) {
-      ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/status/errorCode is invalid"), requestId);
+      ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "page/limit/status/errorCode is invalid"), requestId);
       return true;
     }
     const detail = embeddingTasksForRun(sqlite, { processingRunId: run.id, page, limit, status, errorCode, config });
     const safeDetail = { ...detail, items: detail.items.map((item) => ({ ...item, errorSummary: item.errorSummary ? redactSecrets(item.errorSummary) : null })) };
-    ctx.json(res, 200, { ...safeDetail, progress: redactSecrets(embeddingProgressForRun(sqlite, run.id, config)) }, null, requestId);
+    ctx.ok(res, 200, { ...safeDetail, progress: redactSecrets(embeddingProgressForRun(sqlite, run.id, config)) }, requestId);
     return true;
   }
 
@@ -286,22 +286,22 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (embeddingRunActionMatch && method === "POST") {
     const resource = ctx.resource(embeddingRunActionMatch[1]);
     const run = resource && sqlite.prepare("SELECT pr.*,rv.active_processing_run_id AS active_processing_run_id FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(embeddingRunActionMatch[2], resource.id);
-    if (!run) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Processing run not found"), requestId); return true; }
-    if (resource.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot control embedding tasks"), requestId); return true; }
-    if (run.status === "superseded") { ctx.json(res, 409, null, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task belongs to a superseded processing run"), requestId); return true; }
-    if (run.status !== "indexed") { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only indexed processing runs can control embedding tasks"), requestId); return true; }
-    if (run.active_processing_run_id && run.active_processing_run_id !== run.id) { ctx.json(res, 409, null, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task is no longer part of the active resource generation"), requestId); return true; }
+    if (!run) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Processing run not found"), requestId); return true; }
+    if (resource.status === "archived") { ctx.fail(res, 409, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot control embedding tasks"), requestId); return true; }
+    if (run.status === "superseded") { ctx.fail(res, 409, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task belongs to a superseded processing run"), requestId); return true; }
+    if (run.status !== "indexed") { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "Only indexed processing runs can control embedding tasks"), requestId); return true; }
+    if (run.active_processing_run_id && run.active_processing_run_id !== run.id) { ctx.fail(res, 409, ctx.error("PROCESSING_RUN_SUPERSEDED", "Embedding task is no longer part of the active resource generation"), requestId); return true; }
     const action = embeddingRunActionMatch[3];
     if (action === "cancel") {
       const result = cancelEmbeddingTasksForRun(sqlite, { processingRunId: run.id, config });
       const progress = reconcileEmbeddingProgress(sqlite, { processingRunId: run.id, config, audit: (eventType, entityType, entityId, metadata) => ctx.audit(eventType, entityType, entityId, requestId, metadata) });
       if (result.requested) ctx.audit("embedding_cancel_requested", "processing_run", run.id, requestId, { processingRunId: run.id, requested: result.requested, immediate: result.immediate, running: result.running });
-      ctx.json(res, result.requested ? 202 : 200, { action, ...result, progress: redactSecrets(progress) }, null, requestId);
+      ctx.ok(res, result.requested ? 202 : 200, { action, ...result, progress: redactSecrets(progress) }, requestId);
       return true;
     }
     const result = retryEmbeddingTasksForRun(sqlite, { processingRunId: run.id, config });
     if (result.queued) ctx.audit("embedding_retry_requested", "processing_run", run.id, requestId, { processingRunId: run.id, queued: result.queued, byStatus: result.byStatus });
-    ctx.json(res, result.queued ? 202 : 200, { action, ...result, progress: redactSecrets(result.progress) }, null, requestId);
+    ctx.ok(res, result.queued ? 202 : 200, { action, ...result, progress: redactSecrets(result.progress) }, requestId);
     return true;
   }
 
@@ -309,22 +309,22 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (artifactMatch && method === "GET") {
     const resource = ctx.resource(artifactMatch[1]);
     const run = resource && sqlite.prepare("SELECT pr.* FROM processing_runs pr JOIN resource_versions rv ON rv.id=pr.resource_version_id WHERE pr.id=? AND rv.resource_id=?").get(artifactMatch[2], artifactMatch[1]);
-    if (!run?.canonical_storage_key) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Canonical artifact not found"), requestId); return true; }
+    if (!run?.canonical_storage_key) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Canonical artifact not found"), requestId); return true; }
     try {
       const bytes = readVerified(config.resourceStorageDir, run.canonical_storage_key, run.canonical_byte_size, run.canonical_sha256, "canonical artifact");
-      ctx.json(res, 200, JSON.parse(bytes.toString("utf8")), null, requestId);
+      ctx.ok(res, 200, JSON.parse(bytes.toString("utf8")), requestId);
     } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
 
   const previewMatch = pathname.match(/^\/api\/resources\/([^/]+)\/chunk-preview$/);
   if (previewMatch && method === "POST") {
-    if (!ctx.resource(previewMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    if (typeof body?.text !== "string" || !body.text.trim() || codePointLength(body.text) > 64 * 1024) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "text must be 1-65536 Unicode code points"), requestId); return true; }
+    if (!ctx.resource(previewMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (typeof body?.text !== "string" || !body.text.trim() || codePointLength(body.text) > 64 * 1024) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "text must be 1-65536 Unicode code points"), requestId); return true; }
     try {
       const document = chunkDocument(body.text, normalizeChunkingConfig(body?.chunkingConfig ?? {}));
-      if (document.totalChunks > 500) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "preview produces too many chunks"), requestId); return true; }
-      ctx.json(res, 200, { strategy: document.strategy, profile: document.profile, config: document.config, blocks: document.blocks, parents: document.parents, children: document.children, diagnostics: { ...document.diagnostics, totalChunks: document.totalChunks } }, null, requestId);
+      if (document.totalChunks > 500) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "preview produces too many chunks"), requestId); return true; }
+      ctx.ok(res, 200, { strategy: document.strategy, profile: document.profile, config: document.config, blocks: document.blocks, parents: document.parents, children: document.children, diagnostics: { ...document.diagnostics, totalChunks: document.totalChunks } }, requestId);
     } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
@@ -332,19 +332,19 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   const reprocessMatch = pathname.match(/^\/api\/resources\/([^/]+)\/reprocess$/);
   if (reprocessMatch && method === "POST") {
     const found = ctx.resource(reprocessMatch[1]);
-    if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    if (found.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be processed"), requestId); return true; }
+    if (!found) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (found.status === "archived") { ctx.fail(res, 409, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be processed"), requestId); return true; }
     const target = body?.versionId ? ctx.version(body.versionId) : ctx.version(found.current_version_id);
-    if (!target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource version not found"), requestId); return true; }
+    if (!target || target.resource_id !== found.id) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource version not found"), requestId); return true; }
     let processingRequest;
     try { processingRequest = ocrRequestFor(body, target.mime_type === "application/pdf", target); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
     try { ctx.assertOcrEgress(processingRequest); }
-    catch (caught) { ctx.json(res, 403, null, ctx.error(caught.code || "OCR_EGRESS_BLOCKED", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 403, ctx.error(caught.code || "OCR_EGRESS_BLOCKED", caught.message), requestId); return true; }
     let refreshOcr;
     try { refreshOcr = refreshOcrFor(body, target.mime_type === "application/pdf"); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
-    if (idempotencyKey && idempotencyKey.length > 200) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "Idempotency-Key is too long"), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error(caught.code || "VALIDATION_ERROR", caught.message), requestId); return true; }
+    if (idempotencyKey && idempotencyKey.length > 200) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "Idempotency-Key is too long"), requestId); return true; }
     const processingFingerprint = sha256(JSON.stringify({ versionId: target.id, processingRequest, refreshOcr, chunkingConfig: body?.chunkingConfig ?? null }));
     if (idempotencyKey) {
       const priorTasks = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? ORDER BY created_at DESC,id DESC").all(target.id);
@@ -352,19 +352,19 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
         try {
           const payload = JSON.parse(prior.payload || "{}");
           if (payload.idempotencyKey === idempotencyKey) {
-            if (payload.requestFingerprint !== processingFingerprint) { ctx.json(res, 409, null, ctx.error("IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used for different OCR settings"), requestId); return true; }
-            ctx.json(res, 202, ctx.taskView(prior), null, requestId);
+            if (payload.requestFingerprint !== processingFingerprint) { ctx.fail(res, 409, ctx.error("IDEMPOTENCY_KEY_REUSED", "Idempotency-Key was already used for different OCR settings"), requestId); return true; }
+            ctx.ok(res, 202, ctx.taskView(prior), requestId);
             return true;
           }
         } catch {}
       }
     }
     const activeTask = sqlite.prepare("SELECT * FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') ORDER BY created_at DESC,id DESC LIMIT 1").get(target.id);
-    if (activeTask) { ctx.json(res, 202, ctx.taskView(activeTask), null, requestId); return true; }
+    if (activeTask) { ctx.ok(res, 202, ctx.taskView(activeTask), requestId); return true; }
     let chunkingConfig = null;
     if (body?.chunkingConfig !== undefined) {
       try { chunkingConfig = JSON.stringify(normalizeChunkingConfig(body.chunkingConfig)); }
-      catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+      catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     }
     const timestamp = ctx.now();
     let task;
@@ -374,14 +374,14 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
       task = ctx.queueVersion(target.id, requestId, "reprocess", { ...(idempotencyKey ? { idempotencyKey, requestFingerprint: processingFingerprint } : {}), ...(refreshOcr ? { refreshOcr: true } : {}) });
       ctx.audit("reprocess_requested", "resource_version", target.id, requestId, { taskId: task.id });
     })();
-    ctx.json(res, 202, ctx.taskView(task), null, requestId);
+    ctx.ok(res, 202, ctx.taskView(task), requestId);
     return true;
   }
 
   const versionsMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions$/);
   if (versionsMatch && method === "GET") {
-    if (!ctx.resource(versionsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    ctx.json(res, 200, sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(versionsMatch[1]).map((version) => versionPayload(ctx, version)), null, requestId);
+    if (!ctx.resource(versionsMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    ctx.ok(res, 200, sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? ORDER BY created_at DESC,id DESC").all(versionsMatch[1]).map((version) => versionPayload(ctx, version)), requestId);
     return true;
   }
 
@@ -389,7 +389,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   if (versionPreviewMatch && method === "GET") {
     const resource = ctx.resource(versionPreviewMatch[1]);
     const found = ctx.version(versionPreviewMatch[2]);
-    if (!resource || !found || found.resource_id !== resource.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version not found"), requestId); return true; }
+    if (!resource || !found || found.resource_id !== resource.id) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Version not found"), requestId); return true; }
     const parseOffset = (name) => {
       const value = parsed.searchParams.get(name);
       if (value === null || value === "") return null;
@@ -413,7 +413,7 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
         range = { startOffset, endOffset, contextStart, contextEnd };
         snippet = characters.slice(contextStart, contextEnd).join("");
       }
-      ctx.json(res, 200, { resourceId: resource.id, resourceVersionId: found.id, locator: startOffset === null ? null : { startOffset, endOffset }, range, snippet, source: { resourceId: resource.id, resourceVersionId: found.id, resourceName: resource.name, title: found.title, mimeType: found.mime_type, downloadPath: `/api/resources/${resource.id}/versions/${found.id}/download` } }, null, requestId);
+      ctx.ok(res, 200, { resourceId: resource.id, resourceVersionId: found.id, locator: startOffset === null ? null : { startOffset, endOffset }, range, snippet, source: { resourceId: resource.id, resourceVersionId: found.id, resourceName: resource.name, title: found.title, mimeType: found.mime_type, downloadPath: `/api/resources/${resource.id}/versions/${found.id}/download` } }, requestId);
     } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
@@ -421,11 +421,10 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   const versionContentMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions\/([^/]+)\/(?:content|download)$/);
   if (versionContentMatch && method === "GET") {
     const found = ctx.version(versionContentMatch[2]);
-    if (!found || found.resource_id !== versionContentMatch[1]) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version not found"), requestId); return true; }
+    if (!found || found.resource_id !== versionContentMatch[1]) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Version not found"), requestId); return true; }
     try {
       const bytes = readVerified(config.resourceStorageDir, found.storage_key, found.byte_size, found.content_sha256, "source");
-      res.writeHead(200, { "content-type": found.mime_type, "content-length": bytes.length, "cache-control": "no-store", "x-request-id": requestId, "access-control-allow-origin": ctx.allowedOrigin(res.req?.headers?.origin) });
-      res.end(bytes);
+      ctx.binary(res, 200, bytes, requestId, { "content-type": found.mime_type, "content-length": String(bytes.length), "cache-control": "no-store" });
     } catch (caught) { ctx.respondCaught(res, caught, requestId); }
     return true;
   }
@@ -433,23 +432,23 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
   const versionMatch = pathname.match(/^\/api\/resources\/([^/]+)\/versions\/([^/]+)$/);
   if (versionMatch && method === "GET") {
     const found = ctx.version(versionMatch[2]);
-    if (!found || found.resource_id !== versionMatch[1]) ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version not found"), requestId);
-    else ctx.json(res, 200, versionPayload(ctx, found), null, requestId);
+    if (!found || found.resource_id !== versionMatch[1]) ctx.fail(res, 404, ctx.error("NOT_FOUND", "Version not found"), requestId);
+    else ctx.ok(res, 200, versionPayload(ctx, found), requestId);
     return true;
   }
 
   const retryResourceMatch = pathname.match(/^\/api\/resources\/([^/]+)\/retry$/);
   if (retryResourceMatch && method === "POST") {
     const found = ctx.resource(retryResourceMatch[1]);
-    if (!found) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
-    if (found.status === "archived") { ctx.json(res, 409, null, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be retried"), requestId); return true; }
+    if (!found) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource not found"), requestId); return true; }
+    if (found.status === "archived") { ctx.fail(res, 409, ctx.error("RESOURCE_ARCHIVED", "Archived resources cannot be retried"), requestId); return true; }
     const target = body?.versionId ? ctx.version(body.versionId) : sqlite.prepare("SELECT * FROM resource_versions WHERE resource_id=? AND status='failed' ORDER BY created_at DESC,id DESC LIMIT 1").get(found.id);
-    if (!target || target.resource_id !== found.id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Failed resource version not found"), requestId); return true; }
+    if (!target || target.resource_id !== found.id) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Failed resource version not found"), requestId); return true; }
     const failedProcessingRun = sqlite.prepare("SELECT id FROM processing_runs WHERE resource_version_id=? AND status='failed' ORDER BY created_at DESC,id DESC LIMIT 1").get(target.id);
-    if (target.status !== "failed" && !failedProcessingRun) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Only failed resource versions or processing runs can be retried"), requestId); return true; }
+    if (target.status !== "failed" && !failedProcessingRun) { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "Only failed resource versions or processing runs can be retried"), requestId); return true; }
     try { ctx.assertOcrEgress(processingRequestFromVersion(target, { isPdf: target.mime_type === "application/pdf" })); }
-    catch (caught) { ctx.json(res, 403, null, ctx.error(caught.code || "OCR_EGRESS_BLOCKED", caught.message), requestId); return true; }
-    if (sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(target.id)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "Resource version is already being processed"), requestId); return true; }
+    catch (caught) { ctx.fail(res, 403, ctx.error(caught.code || "OCR_EGRESS_BLOCKED", caught.message), requestId); return true; }
+    if (sqlite.prepare("SELECT id FROM tasks WHERE type='resource:process' AND resource_version_id=? AND status IN ('queued','running','retrying') LIMIT 1").get(target.id)) { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "Resource version is already being processed"), requestId); return true; }
     let task;
     const timestamp = ctx.now();
     sqlite.transaction(() => {
@@ -458,22 +457,22 @@ export const handleResourceRoutes = async ({ ctx, request }) => {
       refreshResourceStatus(sqlite, found.id, timestamp);
       ctx.audit("retry_requested", "resource_version", target.id, requestId, { taskId: task.id });
     })();
-    ctx.json(res, 202, ctx.taskView(task), null, requestId);
+    ctx.ok(res, 202, ctx.taskView(task), requestId);
     return true;
   }
 
   const association = pathname.match(/^\/api\/resources\/([^/]+)\/knowledge-bases\/([^/]+)$/);
   if (association && method === "POST") {
-    if (!ctx.resource(association[1]) || !ctx.validKb(association[2])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Resource or knowledge base not found"), requestId); return true; }
+    if (!ctx.resource(association[1]) || !ctx.validKb(association[2])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Resource or knowledge base not found"), requestId); return true; }
     sqlite.prepare("INSERT OR IGNORE INTO resource_knowledge_bases (resource_id,knowledge_base_id,created_at) VALUES (?,?,?)").run(association[1], association[2], ctx.now());
     ctx.audit("linked", "resource", association[1], requestId, { knowledgeBaseId: association[2] });
-    ctx.json(res, 204, null, null, requestId);
+    ctx.empty(res, 204, requestId);
     return true;
   }
   if (association && method === "DELETE") {
     sqlite.prepare("DELETE FROM resource_knowledge_bases WHERE resource_id=? AND knowledge_base_id=?").run(association[1], association[2]);
     ctx.audit("unlinked", "resource", association[1], requestId, { knowledgeBaseId: association[2] });
-    ctx.json(res, 204, null, null, requestId);
+    ctx.empty(res, 204, requestId);
     return true;
   }
   return false;

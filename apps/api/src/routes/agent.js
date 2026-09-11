@@ -101,33 +101,34 @@ export const handleAgentRoutes = ({ ctx, request }) => {
   if (pathname === "/api/agent/runs" && method === "POST") {
     ctx.assertModelEgress();
     const kind = body?.kind || body?.runKind || "organize";
-    if (!["answer", "organize"].includes(kind)) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "kind must be answer or organize"), requestId); return true; }
+    if (!["answer", "organize"].includes(kind)) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "kind must be answer or organize"), requestId); return true; }
     const prompt = normalizePrompt(body?.prompt);
     const rawScope = scopeBody(body);
     const snapshot = createScopeSnapshot(sqlite, { ...rawScope, organizationMode: body?.organizationMode ?? body?.organization_mode ?? body?.mode ?? (body?.tree === true ? "tree" : rawScope.organizationMode), mountPageId: body?.mountPageId ?? body?.mount_page_id ?? rawScope.mountPageId }, { allowEmpty: false, requireExplicit: true });
     const fingerprint = hash({ kind, prompt, citationPolicy: citationPolicyFor(config, kind), scope: stableScope(snapshot) });
     const created = createRun(ctx, request, kind, prompt, snapshot, fingerprint);
-    ctx.json(res, created.status, { agentRun: created.run, task: created.task, idempotent: created.idempotent }, null, requestId);
+    ctx.ok(res, created.status, { agentRun: created.run, task: created.task, idempotent: created.idempotent }, requestId);
     return true;
   }
 
   const planMatch = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/plan$/);
   if (planMatch && method === "GET") {
     const run = getAgentRun(sqlite, planMatch[1]);
-    if (!run) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Agent run not found"), requestId); return true; }
-    ctx.json(res, 200, { items: getAgentPlan(sqlite, planMatch[1]), tree: getAgentPlanTree(sqlite, planMatch[1]), planStatus: agentPlanStatus(sqlite, planMatch[1]), citationPolicy: run.citationPolicy, organizationMode: run.organizationMode, mountPageId: run.mountPageId }, null, requestId);
+    if (!run) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Agent run not found"), requestId); return true; }
+    ctx.ok(res, 200, { items: getAgentPlan(sqlite, planMatch[1]), tree: getAgentPlanTree(sqlite, planMatch[1]), planStatus: agentPlanStatus(sqlite, planMatch[1]), citationPolicy: run.citationPolicy, organizationMode: run.organizationMode, mountPageId: run.mountPageId }, requestId);
     return true;
   }
   const eventsMatch = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/events$/);
   if (eventsMatch && method === "GET") {
-    if (!getAgentRun(sqlite, eventsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Agent run not found"), requestId); return true; }
-    ctx.json(res, 200, { items: getAgentEvents(sqlite, eventsMatch[1]) }, null, requestId);
+    if (!getAgentRun(sqlite, eventsMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Agent run not found"), requestId); return true; }
+    ctx.ok(res, 200, { items: getAgentEvents(sqlite, eventsMatch[1]) }, requestId);
     return true;
   }
   const runMatch = pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
   if (runMatch && method === "GET") {
     const run = getAgentRun(sqlite, runMatch[1]);
-    ctx.json(res, run ? 200 : 404, run, run ? null : ctx.error("NOT_FOUND", "Agent run not found"), requestId);
+    if (run) ctx.ok(res, 200, run, requestId);
+    else ctx.fail(res, 404, ctx.error("NOT_FOUND", "Agent run not found"), requestId);
     return true;
   }
 
@@ -137,8 +138,8 @@ export const handleAgentRoutes = ({ ctx, request }) => {
     let item;
     if (decision === "approve") item = approveAgentPlanItem(sqlite, ctx.config, decisionMatch[1], { actor: body?.actor || "local-user", requestId });
     else if (decision === "reject") item = rejectAgentPlanItem(sqlite, decisionMatch[1], { actor: body?.actor || "local-user", reason: body?.reason || "Rejected", requestId });
-    else { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "decision must be approve or reject"), requestId); return true; }
-    ctx.json(res, 200, item, null, requestId);
+    else { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "decision must be approve or reject"), requestId); return true; }
+    ctx.ok(res, 200, item, requestId);
     return true;
   }
   const branchMatch = pathname.match(/^\/api\/agent\/plan-items\/([^/]+)\/branch-decision$/);
@@ -146,27 +147,27 @@ export const handleAgentRoutes = ({ ctx, request }) => {
     const decision = body?.decision;
     const options = { actor: body?.actor || "local-user", reason: body?.reason || "Rejected", requestId };
     const items = decision === "approve" ? approveAgentPlanBranch(sqlite, ctx.config, branchMatch[1], options) : decision === "reject" ? rejectAgentPlanBranch(sqlite, branchMatch[1], options) : null;
-    if (!items) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "decision must be approve or reject"), requestId); return true; }
+    if (!items) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "decision must be approve or reject"), requestId); return true; }
     const root = items.find((item) => item.id === branchMatch[1]) || items[0];
-    ctx.json(res, 200, { root, items, planStatus: root ? agentPlanStatus(sqlite, root.runId) : null }, null, requestId);
+    ctx.ok(res, 200, { root, items, planStatus: root ? agentPlanStatus(sqlite, root.runId) : null }, requestId);
     return true;
   }
   const editMatch = pathname.match(/^\/api\/agent\/plan-items\/([^/]+)$/);
   if (editMatch && method === "PATCH") {
     const item = updateAgentPlanItem(sqlite, ctx.config, editMatch[1], body, { actor: body?.actor || "local-user", requestId });
-    ctx.json(res, 200, item, null, requestId);
+    ctx.ok(res, 200, item, requestId);
     return true;
   }
   if (pathname === "/api/agent/plan-items/batch-decision" && method === "POST") {
     const itemIds = body?.itemIds || body?.planItemIds;
     const items = approveAgentPlanBatch(sqlite, ctx.config, itemIds, { actor: body?.actor || "local-user", requestId });
-    ctx.json(res, 200, { items }, null, requestId);
+    ctx.ok(res, 200, { items }, requestId);
     return true;
   }
   const rollbackMatch = pathname.match(/^\/api\/agent\/plan-items\/([^/]+)\/rollback$/);
   if (rollbackMatch && method === "POST") {
     const item = rollbackAgentPlanItem(sqlite, ctx.config, rollbackMatch[1], { actor: body?.actor || "local-user", requestId });
-    ctx.json(res, 200, item, null, requestId);
+    ctx.ok(res, 200, item, requestId);
     return true;
   }
 
@@ -177,20 +178,21 @@ export const handleAgentRoutes = ({ ctx, request }) => {
     const timestamp = now();
     sqlite.prepare("INSERT INTO chat_sessions (id,knowledge_base_id,scope_snapshot,status,created_at,updated_at) VALUES (?,?,?,'active',?,?)").run(id, snapshot.knowledgeBaseId, JSON.stringify(snapshot), timestamp, timestamp);
     ctx.audit("created", "chat_session", id, requestId, { scope: scopeView(snapshot) });
-    ctx.json(res, 201, getChatSession(sqlite, id), null, requestId);
+    ctx.ok(res, 201, getChatSession(sqlite, id), requestId);
     return true;
   }
   const sessionMatch = pathname.match(/^\/api\/chat\/sessions\/([^/]+)$/);
   if (sessionMatch && method === "GET") {
     const session = getChatSession(sqlite, sessionMatch[1], { includeMessages: true });
-    ctx.json(res, session ? 200 : 404, session, session ? null : ctx.error("NOT_FOUND", "Chat session not found"), requestId);
+    if (session) ctx.ok(res, 200, session, requestId);
+    else ctx.fail(res, 404, ctx.error("NOT_FOUND", "Chat session not found"), requestId);
     return true;
   }
   const messageMatch = pathname.match(/^\/api\/chat\/sessions\/([^/]+)\/messages$/);
   if (messageMatch && method === "POST") {
     ctx.assertModelEgress();
     const session = sqlite.prepare("SELECT * FROM chat_sessions WHERE id=? AND status='active'").get(messageMatch[1]);
-    if (!session) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Active chat session not found"), requestId); return true; }
+    if (!session) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Active chat session not found"), requestId); return true; }
     const content = normalizePrompt(body?.content ?? body?.prompt);
     const rawScope = scopeBody(body);
     const hasOverride = scopeFieldPresent(rawScope);
@@ -205,13 +207,14 @@ export const handleAgentRoutes = ({ ctx, request }) => {
     }
     const fingerprint = hash({ sessionId: session.id, content, scope: stableScope(snapshot) });
     const created = createChatMessage(ctx, request, session, content, snapshot, fingerprint);
-    ctx.json(res, created.status, { userMessage: created.userMessage, assistantMessage: created.assistantMessage, task: created.task, agentRun: created.run, idempotent: created.idempotent }, null, requestId);
+    ctx.ok(res, created.status, { userMessage: created.userMessage, assistantMessage: created.assistantMessage, task: created.task, agentRun: created.run, idempotent: created.idempotent }, requestId);
     return true;
   }
   const chatMessageMatch = pathname.match(/^\/api\/chat\/messages\/([^/]+)$/);
   if (chatMessageMatch && method === "GET") {
     const message = getChatMessage(sqlite, chatMessageMatch[1]);
-    ctx.json(res, message ? 200 : 404, message, message ? null : ctx.error("NOT_FOUND", "Chat message not found"), requestId);
+    if (message) ctx.ok(res, 200, message, requestId);
+    else ctx.fail(res, 404, ctx.error("NOT_FOUND", "Chat message not found"), requestId);
     return true;
   }
   return false;

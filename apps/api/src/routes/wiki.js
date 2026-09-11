@@ -345,22 +345,22 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
 
   const wikiMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/wiki$/);
   if (wikiMatch && method === "GET") {
-    if (!kb(ctx, wikiMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
-    ctx.json(res, 200, overview(ctx, wikiMatch[1]), null, requestId);
+    if (!kb(ctx, wikiMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    ctx.ok(res, 200, overview(ctx, wikiMatch[1]), requestId);
     return true;
   }
 
   const pagesMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/wiki\/pages$/);
   if (pagesMatch && method === "GET") {
     const knowledgeBaseId = pagesMatch[1];
-    if (!kb(ctx, knowledgeBaseId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!kb(ctx, knowledgeBaseId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     ensureWiki(ctx.sqlite, knowledgeBaseId);
     const page = Number(parsed.searchParams.get("page") || 1);
     const limit = Number(parsed.searchParams.get("limit") || 50);
     const spaceId = parsed.searchParams.get("spaceId");
     const pageType = parsed.searchParams.get("pageType");
     const status = parsed.searchParams.get("status") || "active";
-    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (pageType && ![...WIKI_PAGE_TYPES, ...SYSTEM_TYPES].includes(pageType)) || !["active", "archived", "system", "all"].includes(status)) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "page/limit/pageType/status is invalid"), requestId); return true; }
+    if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100 || (pageType && ![...WIKI_PAGE_TYPES, ...SYSTEM_TYPES].includes(pageType)) || !["active", "archived", "system", "all"].includes(status)) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "page/limit/pageType/status is invalid"), requestId); return true; }
     const clauses = ["knowledge_base_id=?"];
     const args = [knowledgeBaseId];
     if (spaceId) { clauses.push("space_id=?"); args.push(spaceId); }
@@ -368,39 +368,39 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
     if (status !== "all") { clauses.push("status=?"); args.push(status); }
     const total = ctx.sqlite.prepare(`SELECT count(*) AS count FROM wiki_pages WHERE ${clauses.join(" AND ")}`).get(...args).count;
     const rows = ctx.sqlite.prepare(`SELECT * FROM wiki_pages WHERE ${clauses.join(" AND ")} ORDER BY CASE page_type WHEN 'index' THEN 0 WHEN 'log' THEN 1 ELSE 2 END,title,id LIMIT ? OFFSET ?`).all(...args, limit, (page - 1) * limit);
-    ctx.json(res, 200, { items: rows.map((row) => pageSummary(ctx.sqlite, row)), page, limit, total }, null, requestId);
+    ctx.ok(res, 200, { items: rows.map((row) => pageSummary(ctx.sqlite, row)), page, limit, total }, requestId);
     return true;
   }
 
   if (pagesMatch && method === "POST") {
     const knowledgeBaseId = pagesMatch[1];
-    if (!kb(ctx, knowledgeBaseId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!kb(ctx, knowledgeBaseId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     let pageType;
     try { pageType = normalizePageType(body?.pageType || body?.page_type); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     const title = typeof body?.title === "string" ? body.title.trim() : "";
-    if (!title || title.length > 200) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "title must be 1-200 characters"), requestId); return true; }
+    if (!title || title.length > 200) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "title must be 1-200 characters"), requestId); return true; }
     const id = crypto.randomUUID();
     let slug;
     try { slug = body?.slug === undefined ? slugFromTitle(title, id.slice(0, 8)) : normalizeSlug(body.slug); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     const spaceId = body?.spaceId ?? body?.space_id ?? null;
-    if (!spaceFor(ctx.sqlite, knowledgeBaseId, spaceId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Space not found"), requestId); return true; }
+    if (!spaceFor(ctx.sqlite, knowledgeBaseId, spaceId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Space not found"), requestId); return true; }
     let parentPageId;
     try { parentPageId = assertParent(ctx.sqlite, knowledgeBaseId, id, body?.parentPageId ?? body?.parent_page_id ?? null); }
-    catch (caught) { ctx.json(res, caught.code === "WIKI_PAGE_CYCLE" ? 409 : 404, null, ctx.error(caught.code, caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, caught.code === "WIKI_PAGE_CYCLE" ? 409 : 404, ctx.error(caught.code, caught.message), requestId); return true; }
     try { assertSlugAvailable(ctx.sqlite, knowledgeBaseId, slug); }
-    catch (caught) { ctx.json(res, 409, null, ctx.error(caught.code, caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 409, ctx.error(caught.code, caught.message), requestId); return true; }
     ensureWiki(ctx.sqlite, knowledgeBaseId);
     const template = ctx.sqlite.prepare("SELECT t.*,tv.definition_json FROM wiki_templates t JOIN wiki_template_versions tv ON tv.id=t.current_version_id WHERE t.knowledge_base_id=? AND t.page_type=?").get(knowledgeBaseId, pageType);
-    if (!template) { ctx.json(res, 500, null, ctx.error("INTERNAL_ERROR", "default wiki template is missing"), requestId); return true; }
+    if (!template) { ctx.fail(res, 500, ctx.error("INTERNAL_ERROR", "default wiki template is missing"), requestId); return true; }
     const definition = parseStored(template.definition_json, defaultTemplateDefinition(pageType));
     const contentMarkdown = body?.contentMarkdown ?? body?.content_markdown ?? templateMarkdown(title, definition);
-    if (typeof contentMarkdown !== "string" || utf8ByteLength(contentMarkdown) > MAX_MARKDOWN) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "contentMarkdown must be a UTF-8 string up to 2 MiB"), requestId); return true; }
+    if (typeof contentMarkdown !== "string" || utf8ByteLength(contentMarkdown) > MAX_MARKDOWN) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "contentMarkdown must be a UTF-8 string up to 2 MiB"), requestId); return true; }
     const timestamp = isoNow(ctx);
     const versionId = crypto.randomUUID();
     const blocks = parseMarkdownBlocks(contentMarkdown);
-    if (Object.hasOwn(body || {}, "citations") && !Array.isArray(body.citations)) { ctx.json(res, 400, null, ctx.error("WIKI_CITATION_INVALID", "citations must be an array"), requestId); return true; }
+    if (Object.hasOwn(body || {}, "citations") && !Array.isArray(body.citations)) { ctx.fail(res, 400, ctx.error("WIKI_CITATION_INVALID", "citations must be an array"), requestId); return true; }
     try {
       ctx.sqlite.transaction(() => {
         ctx.sqlite.prepare("INSERT INTO wiki_pages (id,knowledge_base_id,space_id,parent_page_id,slug,title,page_type,status,current_version_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'active',NULL,?,?)").run(id, knowledgeBaseId, spaceId, parentPageId, slug, title, pageType, timestamp, timestamp);
@@ -415,36 +415,36 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
         page.current_version_id = versionId;
       })();
     } catch (caught) {
-      if (caught.code === "WIKI_CITATION_INVALID") { ctx.json(res, 400, null, ctx.error(caught.code, caught.message), requestId); return true; }
+      if (caught.code === "WIKI_CITATION_INVALID") { ctx.fail(res, 400, ctx.error(caught.code, caught.message), requestId); return true; }
       throw caught;
     }
-    ctx.json(res, 201, pageDetail(ctx.sqlite, ctx.sqlite.prepare("SELECT * FROM wiki_pages WHERE id=?").get(id)), null, requestId);
+    ctx.ok(res, 201, pageDetail(ctx.sqlite, ctx.sqlite.prepare("SELECT * FROM wiki_pages WHERE id=?").get(id)), requestId);
     return true;
   }
 
   const impactsMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/wiki\/impacts$/);
   if (impactsMatch && method === "GET") {
-    if (!kb(ctx, impactsMatch[1])) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!kb(ctx, impactsMatch[1])) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     const items = impactRows(ctx, impactsMatch[1]);
-    ctx.json(res, 200, { items, count: items.length }, null, requestId);
+    ctx.ok(res, 200, { items, count: items.length }, requestId);
     return true;
   }
 
   const templatesMatch = pathname.match(/^\/api\/knowledge-bases\/([^/]+)\/wiki\/templates$/);
   if (templatesMatch && (method === "GET" || method === "POST")) {
     const knowledgeBaseId = templatesMatch[1];
-    if (!kb(ctx, knowledgeBaseId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
+    if (!kb(ctx, knowledgeBaseId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Knowledge base not found"), requestId); return true; }
     ensureWiki(ctx.sqlite, knowledgeBaseId);
     if (method === "GET") {
-      ctx.json(res, 200, ctx.sqlite.prepare("SELECT * FROM wiki_templates WHERE knowledge_base_id=? ORDER BY page_type").all(knowledgeBaseId).map((row) => templateView(ctx.sqlite, row)), null, requestId);
+      ctx.ok(res, 200, ctx.sqlite.prepare("SELECT * FROM wiki_templates WHERE knowledge_base_id=? ORDER BY page_type").all(knowledgeBaseId).map((row) => templateView(ctx.sqlite, row)), requestId);
       return true;
     }
     let pageType;
     try { pageType = normalizePageType(body?.pageType || body?.page_type); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     let definition;
     try { definition = normalizeTemplateDefinition(body?.definition, pageType); }
-    catch (caught) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", caught.message), requestId); return true; }
     const template = ctx.sqlite.prepare("SELECT * FROM wiki_templates WHERE knowledge_base_id=? AND page_type=?").get(knowledgeBaseId, pageType);
     const timestamp = isoNow(ctx);
     const versionId = crypto.randomUUID();
@@ -453,60 +453,60 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
       ctx.sqlite.prepare("UPDATE wiki_templates SET current_version_id=?,updated_at=? WHERE id=?").run(versionId, timestamp, template.id);
       ctx.audit("updated", "wiki_template", template.id, requestId, { pageType, templateVersionId: versionId });
     })();
-    ctx.json(res, 201, templateView(ctx.sqlite, ctx.sqlite.prepare("SELECT * FROM wiki_templates WHERE id=?").get(template.id)), null, requestId);
+    ctx.ok(res, 201, templateView(ctx.sqlite, ctx.sqlite.prepare("SELECT * FROM wiki_templates WHERE id=?").get(template.id)), requestId);
     return true;
   }
 
   const pageMatch = pathname.match(/^\/api\/wiki\/pages\/([^/]+)$/);
   if (pageMatch && (method === "GET" || method === "PATCH")) {
     const page = pageFor(ctx.sqlite, pageMatch[1]);
-    if (!page) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki page not found"), requestId); return true; }
+    if (!page) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Wiki page not found"), requestId); return true; }
     if (method === "GET") {
       const compareId = parsed.searchParams.get("compareVersionId");
       const compare = compareId ? ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=? AND page_id=?").get(compareId, page.id) : null;
-      if (compareId && !compare) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Comparison version not found"), requestId); return true; }
-      ctx.json(res, 200, pageDetail(ctx.sqlite, page, { compareVersion: compare }), null, requestId);
+      if (compareId && !compare) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Comparison version not found"), requestId); return true; }
+      ctx.ok(res, 200, pageDetail(ctx.sqlite, page, { compareVersion: compare }), requestId);
       return true;
     }
-    if (SYSTEM_TYPES.has(page.page_type)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "System pages are read-only"), requestId); return true; }
-    if (Object.hasOwn(body || {}, "contentMarkdown") || Object.hasOwn(body || {}, "content_markdown")) { ctx.json(res, 409, null, ctx.error("WIKI_PAGE_METADATA_ONLY", "Use the versions endpoint to edit page content"), requestId); return true; }
+    if (SYSTEM_TYPES.has(page.page_type)) { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "System pages are read-only"), requestId); return true; }
+    if (Object.hasOwn(body || {}, "contentMarkdown") || Object.hasOwn(body || {}, "content_markdown")) { ctx.fail(res, 409, ctx.error("WIKI_PAGE_METADATA_ONLY", "Use the versions endpoint to edit page content"), requestId); return true; }
     const allowed = new Set(["title", "slug", "spaceId", "space_id", "parentPageId", "parent_page_id"]);
-    if (Object.keys(body || {}).some((key) => !allowed.has(key))) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "only page metadata can be changed"), requestId); return true; }
+    if (Object.keys(body || {}).some((key) => !allowed.has(key))) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "only page metadata can be changed"), requestId); return true; }
     const title = body?.title === undefined ? page.title : typeof body.title === "string" ? body.title.trim() : "";
-    if (!title || title.length > 200) { ctx.json(res, 400, null, ctx.error("VALIDATION_ERROR", "title must be 1-200 characters"), requestId); return true; }
+    if (!title || title.length > 200) { ctx.fail(res, 400, ctx.error("VALIDATION_ERROR", "title must be 1-200 characters"), requestId); return true; }
     let slug;
     try { slug = body?.slug === undefined ? page.slug : normalizeSlug(body.slug); assertSlugAvailable(ctx.sqlite, page.knowledge_base_id, slug, page.id); }
-    catch (caught) { ctx.json(res, caught.code === "DUPLICATE_NAME" ? 409 : 400, null, ctx.error(caught.code, caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, caught.code === "DUPLICATE_NAME" ? 409 : 400, ctx.error(caught.code, caught.message), requestId); return true; }
     const spaceId = body?.spaceId ?? body?.space_id ?? page.space_id;
-    if (!spaceFor(ctx.sqlite, page.knowledge_base_id, spaceId)) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Space not found"), requestId); return true; }
+    if (!spaceFor(ctx.sqlite, page.knowledge_base_id, spaceId)) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Space not found"), requestId); return true; }
     let parentPageId;
     try { parentPageId = assertParent(ctx.sqlite, page.knowledge_base_id, page.id, body?.parentPageId === undefined && body?.parent_page_id === undefined ? page.parent_page_id : body.parentPageId ?? body.parent_page_id); }
-    catch (caught) { ctx.json(res, caught.code === "WIKI_PAGE_CYCLE" ? 409 : 404, null, ctx.error(caught.code, caught.message), requestId); return true; }
+    catch (caught) { ctx.fail(res, caught.code === "WIKI_PAGE_CYCLE" ? 409 : 404, ctx.error(caught.code, caught.message), requestId); return true; }
     ctx.sqlite.transaction(() => {
       ctx.sqlite.prepare("UPDATE wiki_pages SET title=?,slug=?,space_id=?,parent_page_id=?,updated_at=? WHERE id=?").run(title, slug, spaceId, parentPageId, isoNow(ctx), page.id);
       updateWikiSearchProjection(ctx.sqlite, page.id);
       queuePageEmbedding(ctx, page.id, page.current_version_id, requestId, "wiki-page-metadata-updated");
       ctx.audit("updated", "wiki_page", page.id, requestId, { metadataOnly: true });
     })();
-    ctx.json(res, 200, pageDetail(ctx.sqlite, pageFor(ctx.sqlite, page.id)), null, requestId);
+    ctx.ok(res, 200, pageDetail(ctx.sqlite, pageFor(ctx.sqlite, page.id)), requestId);
     return true;
   }
 
   const versionsMatch = pathname.match(/^\/api\/wiki\/pages\/([^/]+)\/versions$/);
   if (versionsMatch && (method === "GET" || method === "POST")) {
     const page = pageFor(ctx.sqlite, versionsMatch[1]);
-    if (!page) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki page not found"), requestId); return true; }
-    if (SYSTEM_TYPES.has(page.page_type)) { ctx.json(res, 409, null, ctx.error("INVALID_STATE_TRANSITION", "System pages are read-only"), requestId); return true; }
+    if (!page) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Wiki page not found"), requestId); return true; }
+    if (SYSTEM_TYPES.has(page.page_type)) { ctx.fail(res, 409, ctx.error("INVALID_STATE_TRANSITION", "System pages are read-only"), requestId); return true; }
     if (method === "GET") {
-      ctx.json(res, 200, ctx.sqlite.prepare("SELECT id,page_id,parent_version_id,template_version_id,content_sha256,change_summary,restore_of_version_id,created_at FROM wiki_page_versions WHERE page_id=? ORDER BY created_at DESC,id DESC").all(page.id).map((version) => ({ ...version, pageId: version.page_id, parentVersionId: version.parent_version_id, templateVersionId: version.template_version_id, contentSha256: version.content_sha256, changeSummary: version.change_summary, restoreOfVersionId: version.restore_of_version_id, createdAt: version.created_at })), null, requestId);
+      ctx.ok(res, 200, ctx.sqlite.prepare("SELECT id,page_id,parent_version_id,template_version_id,content_sha256,change_summary,restore_of_version_id,created_at FROM wiki_page_versions WHERE page_id=? ORDER BY created_at DESC,id DESC").all(page.id).map((version) => ({ ...version, pageId: version.page_id, parentVersionId: version.parent_version_id, templateVersionId: version.template_version_id, contentSha256: version.content_sha256, changeSummary: version.change_summary, restoreOfVersionId: version.restore_of_version_id, createdAt: version.created_at })), requestId);
       return true;
     }
     const baseVersionId = body?.baseVersionId ?? body?.base_version_id;
     try {
       const version = insertPageVersion(ctx, page, { contentMarkdown: body?.contentMarkdown ?? body?.content_markdown, baseVersionId, changeSummary: body?.changeSummary ?? body?.change_summary ?? null, citations: body?.citations, requestId });
-      ctx.json(res, 201, versionView(ctx.sqlite, version), null, requestId);
+      ctx.ok(res, 201, versionView(ctx.sqlite, version), requestId);
     } catch (caught) {
-      if (["WIKI_VERSION_CONFLICT", "WIKI_CITATION_INVALID"].includes(caught.code)) { ctx.json(res, caught.code === "WIKI_VERSION_CONFLICT" ? 409 : 400, null, ctx.error(caught.code, caught.message), requestId); return true; }
+      if (["WIKI_VERSION_CONFLICT", "WIKI_CITATION_INVALID"].includes(caught.code)) { ctx.fail(res, caught.code === "WIKI_VERSION_CONFLICT" ? 409 : 400, ctx.error(caught.code, caught.message), requestId); return true; }
       throw caught;
     }
     return true;
@@ -516,26 +516,26 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
   if (versionMatch && method === "GET") {
     const page = pageFor(ctx.sqlite, versionMatch[1]);
     const version = page && ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=? AND page_id=?").get(versionMatch[2], page.id);
-    if (!version) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki version not found"), requestId); return true; }
+    if (!version) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Wiki version not found"), requestId); return true; }
     const compareId = parsed.searchParams.get("compareVersionId");
     const compare = compareId ? ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=? AND page_id=?").get(compareId, page.id) : null;
-    if (compareId && !compare) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Comparison version not found"), requestId); return true; }
-    ctx.json(res, 200, versionView(ctx.sqlite, version, { compareVersion: compare }), null, requestId);
+    if (compareId && !compare) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Comparison version not found"), requestId); return true; }
+    ctx.ok(res, 200, versionView(ctx.sqlite, version, { compareVersion: compare }), requestId);
     return true;
   }
 
   const restoreMatch = pathname.match(/^\/api\/wiki\/pages\/([^/]+)\/restore$/);
   if (restoreMatch && method === "POST") {
     const page = pageFor(ctx.sqlite, restoreMatch[1]);
-    if (!page) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki page not found"), requestId); return true; }
+    if (!page) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Wiki page not found"), requestId); return true; }
     const sourceId = body?.versionId ?? body?.version_id;
     const source = ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=? AND page_id=?").get(sourceId, page.id);
-    if (!source) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Version to restore not found"), requestId); return true; }
+    if (!source) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Version to restore not found"), requestId); return true; }
     try {
       const version = insertPageVersion(ctx, page, { contentMarkdown: source.content_markdown, baseVersionId: body?.baseVersionId ?? body?.base_version_id, changeSummary: body?.changeSummary ?? `Restore version ${source.id}`, restoreOfVersionId: source.id, requestId });
-      ctx.json(res, 201, versionView(ctx.sqlite, version), null, requestId);
+      ctx.ok(res, 201, versionView(ctx.sqlite, version), requestId);
     } catch (caught) {
-      if (caught.code === "WIKI_VERSION_CONFLICT") { ctx.json(res, 409, null, ctx.error(caught.code, caught.message), requestId); return true; }
+      if (caught.code === "WIKI_VERSION_CONFLICT") { ctx.fail(res, 409, ctx.error(caught.code, caught.message), requestId); return true; }
       throw caught;
     }
     return true;
@@ -544,14 +544,14 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
   const citationsMatch = pathname.match(/^\/api\/wiki\/pages\/([^/]+)\/citations$/);
   if (citationsMatch && (method === "GET" || method === "POST")) {
     const page = pageFor(ctx.sqlite, citationsMatch[1]);
-    if (!page?.current_version_id) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki page version not found"), requestId); return true; }
+    if (!page?.current_version_id) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Wiki page version not found"), requestId); return true; }
     if (method === "GET") {
       const versionId = parsed.searchParams.get("versionId") || page.current_version_id;
       const version = ctx.sqlite.prepare("SELECT id FROM wiki_page_versions WHERE id=? AND page_id=?").get(versionId, page.id);
-      if (!version) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Wiki page version not found"), requestId); return true; }
+      if (!version) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Wiki page version not found"), requestId); return true; }
       const resourceCitations = ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE page_version_id=? ORDER BY created_at,id").all(version.id).map((row) => citationView(ctx.sqlite, row));
       const pageCitations = ctx.sqlite.prepare("SELECT * FROM wiki_page_citations WHERE page_version_id=? ORDER BY created_at,id").all(version.id).map((row) => pageCitationView(ctx.sqlite, row));
-      ctx.json(res, 200, [...resourceCitations, ...pageCitations], null, requestId);
+      ctx.ok(res, 200, [...resourceCitations, ...pageCitations], requestId);
       return true;
     }
     try {
@@ -564,9 +564,9 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
         id = insertCitation(ctx.sqlite, input, version.id, timestamp);
         ctx.audit("created", "wiki_citation", id, requestId, { pageVersionId: version.id, resourceVersionId: input.resourceVersion.id });
       })();
-      ctx.json(res, 201, citationView(ctx.sqlite, ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE id=?").get(id)), null, requestId);
+      ctx.ok(res, 201, citationView(ctx.sqlite, ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE id=?").get(id)), requestId);
     } catch (caught) {
-      if (caught.code === "WIKI_CITATION_INVALID") { ctx.json(res, 400, null, ctx.error(caught.code, caught.message), requestId); return true; }
+      if (caught.code === "WIKI_CITATION_INVALID") { ctx.fail(res, 400, ctx.error(caught.code, caught.message), requestId); return true; }
       throw caught;
     }
     return true;
@@ -579,8 +579,8 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
     const toId = parsed.searchParams.get("toVersionId") || page?.current_version_id;
     const from = page && ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=? AND page_id=?").get(fromId, page.id);
     const to = page && ctx.sqlite.prepare("SELECT * FROM wiki_page_versions WHERE id=? AND page_id=?").get(toId, page.id);
-    if (!from || !to) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Diff version not found"), requestId); return true; }
-    ctx.json(res, 200, { pageId: page.id, fromVersionId: from.id, toVersionId: to.id, diff: diffMarkdown(from.content_markdown, to.content_markdown) }, null, requestId);
+    if (!from || !to) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Diff version not found"), requestId); return true; }
+    ctx.ok(res, 200, { pageId: page.id, fromVersionId: from.id, toVersionId: to.id, diff: diffMarkdown(from.content_markdown, to.content_markdown) }, requestId);
     return true;
   }
 
@@ -588,20 +588,20 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
   const citationPreviewMatch = pathname.match(/^\/api\/wiki\/citations\/([^/]+)\/preview$/);
   if (citationPreviewMatch && method === "GET") {
     const citation = ctx.sqlite.prepare("SELECT c.*,p.knowledge_base_id FROM wiki_citations c JOIN wiki_page_versions v ON v.id=c.page_version_id JOIN wiki_pages p ON p.id=v.page_id WHERE c.id=?").get(citationPreviewMatch[1]);
-    if (!citation) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Citation not found"), requestId); return true; }
+    if (!citation) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Citation not found"), requestId); return true; }
     const source = resourceVersionForCitation(ctx.sqlite, citation.knowledge_base_id, citation.resource_version_id);
-    if (!source) { ctx.json(res, 409, null, ctx.error("WIKI_CITATION_INVALID", "Citation source is unavailable"), requestId); return true; }
+    if (!source) { ctx.fail(res, 409, ctx.error("WIKI_CITATION_INVALID", "Citation source is unavailable"), requestId); return true; }
     let bytes;
     try { bytes = readBytes(ctx.config.resourceStorageDir, source.storage_key); }
-    catch { ctx.json(res, 409, null, ctx.error("WIKI_CITATION_INVALID", "Citation source is unavailable"), requestId); return true; }
-    if (bytes.length !== source.byte_size || sha256(bytes) !== source.content_sha256) { ctx.json(res, 409, null, ctx.error("WIKI_CITATION_INVALID", "Citation source integrity check failed"), requestId); return true; }
+    catch { ctx.fail(res, 409, ctx.error("WIKI_CITATION_INVALID", "Citation source is unavailable"), requestId); return true; }
+    if (bytes.length !== source.byte_size || sha256(bytes) !== source.content_sha256) { ctx.fail(res, 409, ctx.error("WIKI_CITATION_INVALID", "Citation source integrity check failed"), requestId); return true; }
     const sourceText = source.mime_type.startsWith("text/") ? normalizeCanonicalText(bytes.toString("utf8")) : null;
     const bounds = citationSourceBounds({ sqlite: ctx.sqlite, resourceVersion: source, resourceStorageDir: ctx.config.resourceStorageDir });
     let locator;
     try { locator = normalizeCitationLocator(citation.locator_json, bounds); }
-    catch (caught) { ctx.json(res, 409, null, ctx.error("WIKI_CITATION_INVALID", caught.message), requestId); return true; }
-    if (source.mime_type === "application/pdf" && (locator.startOffset !== undefined || locator.endOffset !== undefined) && bounds.canonicalIntegrity !== "valid") { ctx.json(res, 409, null, ctx.error("WIKI_CITATION_INVALID", "Citation canonical source is unavailable"), requestId); return true; }
-    if (source.mime_type === "application/pdf" && [locator.page, locator.pageStart, locator.pageEnd, ...(locator.pages || [])].some((page) => page !== undefined) && bounds.pageCount === null) { ctx.json(res, 409, null, ctx.error("WIKI_CITATION_INVALID", "Citation source page count is unavailable"), requestId); return true; }
+    catch (caught) { ctx.fail(res, 409, ctx.error("WIKI_CITATION_INVALID", caught.message), requestId); return true; }
+    if (source.mime_type === "application/pdf" && (locator.startOffset !== undefined || locator.endOffset !== undefined) && bounds.canonicalIntegrity !== "valid") { ctx.fail(res, 409, ctx.error("WIKI_CITATION_INVALID", "Citation canonical source is unavailable"), requestId); return true; }
+    if (source.mime_type === "application/pdf" && [locator.page, locator.pageStart, locator.pageEnd, ...(locator.pages || [])].some((page) => page !== undefined) && bounds.pageCount === null) { ctx.fail(res, 409, ctx.error("WIKI_CITATION_INVALID", "Citation source page count is unavailable"), requestId); return true; }
     let range = null;
     let snippet = null;
     if (sourceText !== null && locator.startOffset !== undefined) {
@@ -611,15 +611,15 @@ export const handleWikiRoutes = async ({ ctx, request }) => {
       range = { startOffset: locator.startOffset, endOffset: locator.endOffset, contextStart, contextEnd };
       snippet = characters.slice(contextStart, contextEnd).join("");
     }
-    ctx.json(res, 200, { citationId: citation.id, resourceVersionId: source.id, locator, range, snippet, source: citationView(ctx.sqlite, citation).source }, null, requestId);
+    ctx.ok(res, 200, { citationId: citation.id, resourceVersionId: source.id, locator, range, snippet, source: citationView(ctx.sqlite, citation).source }, requestId);
     return true;
   }
   if (citationMatch && method === "GET") {
     const citation = ctx.sqlite.prepare("SELECT * FROM wiki_citations WHERE id=?").get(citationMatch[1]);
-    if (citation) { ctx.json(res, 200, citationView(ctx.sqlite, citation), null, requestId); return true; }
+    if (citation) { ctx.ok(res, 200, citationView(ctx.sqlite, citation), requestId); return true; }
     const pageCitation = ctx.sqlite.prepare("SELECT * FROM wiki_page_citations WHERE id=?").get(citationMatch[1]);
-    if (!pageCitation) { ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Citation not found"), requestId); return true; }
-    ctx.json(res, 200, pageCitationView(ctx.sqlite, pageCitation), null, requestId);
+    if (!pageCitation) { ctx.fail(res, 404, ctx.error("NOT_FOUND", "Citation not found"), requestId); return true; }
+    ctx.ok(res, 200, pageCitationView(ctx.sqlite, pageCitation), requestId);
     return true;
   }
   return false;

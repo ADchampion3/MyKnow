@@ -10,39 +10,62 @@ import { handleAgentRoutes } from "./routes/agent.js";
 
 const routeHandlers = [handleAgentRoutes, handleWikiRoutes, handleKnowledgeBaseRoutes, handleResourceRoutes, handleRetrievalRoutes, handleTaskRoutes];
 
-export const createRequestHandler = ({ config, sqlite, db }) => {
-  const ctx = createApiContext({ config, sqlite, db, http: createHttpTools({ config }) });
+export const createApiRouteHandler = ({ config, sqlite, db, http = createHttpTools({ config }) }) => {
+  const ctx = createApiContext({ config, sqlite, db, http });
 
-  return async (req, res) => {
+  return async (webRequest) => {
     const requestId = crypto.randomUUID();
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "access-control-allow-origin": ctx.allowedOrigin(req.headers.origin),
-        "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
-        "access-control-allow-headers": "content-type, idempotency-key"
-      });
-      return res.end();
-    }
-    if (req.url === "/health" && req.method === "GET") return ctx.json(res, 200, { status: "ok", service: "api" });
-    if (req.url === "/ready" && req.method === "GET") return ctx.json(res, 200, { status: "ready", service: "api" });
-
+    const reply = ctx.createReply(webRequest?.headers?.get?.("origin") || null);
     try {
-      const parsed = new URL(req.url, "http://localhost");
+      if (!(webRequest instanceof Request)) throw ctx.error("VALIDATION_ERROR", "a Fetch Request is required");
+      if (webRequest.method === "OPTIONS") {
+        return ctx.empty(reply, 204, requestId, {
+          "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS"
+        });
+      }
+      const parsed = new URL(webRequest.url);
+      if (parsed.pathname === "/health" && webRequest.method === "GET") return ctx.ok(reply, 200, { status: "ok", service: "api" }, requestId);
+      if (parsed.pathname === "/ready" && webRequest.method === "GET") return ctx.ok(reply, 200, { status: "ready", service: "api" }, requestId);
+
+      const method = webRequest.method;
       const request = {
-        req,
-        res,
+        request: webRequest,
+        res: reply,
         parsed,
         pathname: parsed.pathname,
-        method: req.method,
-        body: ["POST", "PATCH"].includes(req.method) ? await ctx.readBody(req) : {},
+        method,
+        body: ["POST", "PATCH"].includes(method) ? await ctx.readBody(webRequest, ctx.bodySchemaFor({ pathname: parsed.pathname, method })) : {},
         requestId,
-        idempotencyKey: typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"].trim() : null
+        idempotencyKey: webRequest.headers.get("idempotency-key")?.trim() || null
       };
-      if (request.pathname === "/api/runtime" && request.method === "GET") return ctx.json(res, 200, ctx.runtimeView(), null, requestId);
-      for (const handler of routeHandlers) if (await handler({ ctx, request })) return;
-      return ctx.json(res, 404, null, ctx.error("NOT_FOUND", "Route not found"), requestId);
+      if (request.pathname === "/api/runtime" && request.method === "GET") return ctx.ok(reply, 200, ctx.runtimeView(), requestId);
+      for (const handler of routeHandlers) {
+        const result = await handler({ ctx, request });
+        if (result instanceof Response) return result;
+        if (result) {
+          if (reply.response) return reply.response;
+          throw new Error("route handler did not publish a response");
+        }
+      }
+      return ctx.fail(reply, 404, ctx.error("NOT_FOUND", "Route not found"), requestId);
     } catch (caught) {
-      return ctx.respondCaught(res, caught, requestId);
+      return ctx.respondCaught(reply, caught, requestId);
     }
+  };
+};
+
+export const createRequestHandler = ({ config, sqlite, db }) => {
+  const http = createHttpTools({ config });
+  const handleRequest = createApiRouteHandler({ config, sqlite, db, http });
+
+  return async (nodeRequest, nodeResponse) => {
+    let response;
+    try {
+      response = await handleRequest(http.requestFromNode(nodeRequest));
+    } catch (caught) {
+      const reply = http.createReply(nodeRequest.headers?.origin);
+      response = http.respondCaught(reply, caught, crypto.randomUUID());
+    }
+    return http.sendToNodeResponse(nodeResponse, response);
   };
 };
